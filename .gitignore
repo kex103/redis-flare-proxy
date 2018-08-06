@@ -1,0 +1,3 @@
+target/
+tests/bin/
+tests/*.out

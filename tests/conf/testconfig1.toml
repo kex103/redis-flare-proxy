@@ -1,0 +1,9 @@
+[admin]
+listen = "127.0.0.1:1530"
+
+[pools]
+  [pools.pool1]
+    listen = "127.0.0.1:1531"
+    servers = [
+      { host = "127.0.0.1:6380", weight = 1}
+    ]

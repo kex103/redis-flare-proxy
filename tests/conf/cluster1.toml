@@ -1,0 +1,11 @@
+[admin]
+listen = "127.0.0.1:1530"
+
+[pools]
+  [pools.pool1]
+    listen = "127.0.0.1:1533"
+    [[pools.pool1.servers]]
+        host = "cluster1"
+        use_cluster = true
+        cluster_hosts = ["127.0.0.1:7000","127.0.0.1:7001"]
+        weight = 1

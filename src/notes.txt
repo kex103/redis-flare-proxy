@@ -1,0 +1,37 @@
+// How to handle timeouts.
+// Every request is going to need a timestamp, if there is a timeout, and that needs to be stored somewhere, probably in queue.
+// The Poll is going to need the lowest timeout out of all pools whenever it starts a polling session.
+// Then, if it completes without any events, it needs to identify if the poll actually finished, OR fulfilling a request modifies 
+// the queue and gets rid of the associated timestamp.
+
+// So I'm thinking, every backend contains its queue, and we have a cached queue provided to the poll.
+// The cached queue contains timestamp, and points to the backend queue.
+// We can pop elements from this queue when the poll times out. we will then have to check the associated backend if it has any
+// more elements.
+
+// How do we remove elements that get fulfilled before it times out? This is the common case.
+
+// SO, twemproxy maintains one binary tree to do this.
+// We're keeping multiple queues, with one cached queue?
+// How about, when we poll for the next time, we verify that it is actually still necessary. If not, we poll again.
+// That way, we don't need to delete stuff for existing things. It'll get cleaned up at the end of each poll cycle.
+
+// So here, we have this idea of a backend. an abstraction, which probably does cost us a little bit in terms of performance.
+// *it has a lookup*.
+
+// So steps:
+// 1: we want to add in timestamps to the backend queues.
+// 2: we want a global queue for timestamp/token>
+// 3: we'll want to add a "handle_timeout" function for backend, to be called when popped from global queue.
+// 4: we'll want to drain queue until empty or we get an element that has a timestamp that hasn't happened yet.
+// 5: Update the queue when requests are sent.
+
+
+// BIG problem: how do we load a config without disrupting existing redis traffic?
+// Answer: you don't, or it has to be broken up into little reductions, like erlang.
+
+// SO:
+// addition:
+
+// Poll 1 had zero requests queued up. its first request, it comes in, it'll then add in an element to the cached queue.
+// Cached queue expires. checks if it's still relevant.

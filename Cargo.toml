@@ -1,0 +1,32 @@
+[package]
+name = "rustproxy"
+version = "0.1.0"
+authors = ["Kevin Xiao <xiaok10003@gmail.com>"]
+
+[dependencies]
+mio = "0.6"
+mio-more = "0.1.0"
+toml = "0.3.1"
+log = "0.3.7"
+env_logger = "*"
+serde_derive = "0.9.13"
+serde = "0.9"
+clap = "2.23.3"
+daemonize = "0.2.3"
+log4rs = "0.7.0"
+conhash = "*"
+rand = "0.3"
+crc16 = "0.3.3"
+bufstream = "0.1"
+
+[dev-dependencies]
+redis = "0.5.3"
+time = "0.1"
+
+[[bin]]
+name = "rustproxy"
+path = "src/main.rs"
+
+[[bin]]
+name = "rustproxy-benchmark"
+path = "src/benchmark/main.rs"

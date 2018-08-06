@@ -1,0 +1,7 @@
+alpha:
+  listen: 127.0.0.1:1531
+  redis: true
+  server_retry_timeout: 100
+  server_failure_limit: 1
+  servers:
+   - 127.0.0.1:6380:1

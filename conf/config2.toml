@@ -1,0 +1,10 @@
+
+[admin]
+listen = "127.0.0.1:1532"
+
+[pools]
+  [pools.pool1]
+    listen = "127.0.0.1:1533"
+    servers = [
+      "127.0.0.1:6379"
+    ]
