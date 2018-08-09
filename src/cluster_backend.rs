@@ -212,6 +212,7 @@ pub struct ClusterBackend {
     retry_timeout: usize,
     backend_tokens_registry: Rc<RefCell<HashMap<BackendToken, PoolToken>>>,
     subscribers_registry: Rc<RefCell<HashMap<Token, Subscriber>>>,
+    poll_registry: Rc<RefCell<Poll>>,
     next_socket_index: Rc<Cell<usize>>,
 }
 impl ClusterBackend {
@@ -220,6 +221,7 @@ impl ClusterBackend {
         token: BackendToken,
         backend_tokens_registry: &Rc<RefCell<HashMap<BackendToken, PoolToken>>>,
         subscribers_registry: &Rc<RefCell<HashMap<Token, Subscriber>>>,
+        poll_registry: &Rc<RefCell<Poll>>,
         next_socket_index: &Rc<Cell<usize>>,
         timeout: usize,
         failure_limit: usize,
@@ -243,6 +245,7 @@ impl ClusterBackend {
             retry_timeout: retry_timeout,
             backend_tokens_registry: Rc::clone(backend_tokens_registry),
             subscribers_registry: Rc::clone(subscribers_registry),
+            poll_registry: Rc::clone(poll_registry),
             next_socket_index: Rc::clone(next_socket_index),
         };
         for _ in 0..cluster.slots.capacity() {
@@ -258,6 +261,7 @@ impl ClusterBackend {
                 host.clone(),
                 backend_token,
                 subscribers_registry,
+                poll_registry,
                 timeout,
                 failure_limit,
                 retry_timeout,
@@ -280,6 +284,7 @@ impl ClusterBackend {
                 host.clone(),
                 backend_token,
                 &self.subscribers_registry,
+                &self.poll_registry,
                 self.timeout,
                 self.failure_limit,
                 self.retry_timeout,
@@ -295,13 +300,10 @@ impl ClusterBackend {
         return self.status == BackendStatus::CONNECTED;
     }
 
-    pub fn connect(
-        &mut self,
-        poll: &mut Poll,
-    ) {
+    pub fn connect(&mut self) {
         for (ref _host, ref mut backend) in &mut self.hosts {
             debug!("KEX: connecting for a host! {:?}", _host);
-            backend.connect(poll);
+            backend.connect();
         }
         self.change_state(BackendStatus::CONNECTING, NULL_TOKEN);
     }
@@ -313,8 +315,7 @@ impl ClusterBackend {
         self.queue.push_back(host.queue.back().unwrap().clone());
     }
 
-    pub fn handle_backend_response(&mut self, token: Token, 
-        poll: &mut Poll,) {
+    pub fn handle_backend_response(&mut self, token: Token) {
         // Grab response.
         // Look up queue. If it is token 0.
         // handle it.
@@ -346,7 +347,7 @@ impl ClusterBackend {
                 if !self.hostnames.contains_key(&host) {
                     self.initialize_host(host.clone());
                     let backend_token = self.hostnames.get(&host).unwrap();
-                    self.hosts.get_mut(backend_token).unwrap().connect(poll);
+                    self.hosts.get_mut(backend_token).unwrap().connect();
                     self.register_backend_with_parent(backend_token.clone(), self.token.clone());
                 }
             };
@@ -368,15 +369,14 @@ impl ClusterBackend {
         // Check that backend has information in the socket still.
         if self.queue.len() > 0 {
             debug!("Still ahve leftover in backned!");
-            self.handle_backend_response(token, poll);
+            self.handle_backend_response(token);
         }
     }
 
     pub fn handle_backend_failure(&mut self,
         token: BackendToken,
-        poll: &mut Poll,
     ) {
-        self.hosts.get_mut(&token).unwrap().handle_backend_failure(poll);
+        self.hosts.get_mut(&token).unwrap().handle_backend_failure();
     }
 
     fn change_state(&mut self, target_state: BackendStatus, backend_token: BackendToken) -> bool {

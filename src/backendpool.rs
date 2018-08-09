@@ -67,7 +67,7 @@ impl BackendPool {
         &mut self,
         backend_tokens_registry: &Rc<RefCell<HashMap<BackendToken, PoolToken>>>,
         next_socket_index: &Rc<Cell<usize>>,
-        poll: &mut Poll,
+        poll_registry: &Rc<RefCell<Poll>>,
         subscribers_registry: &Rc<RefCell<HashMap<Token, Subscriber>>>,
         written_sockets: &mut VecDeque<(Token, StreamType)>,
     ) {
@@ -79,6 +79,7 @@ impl BackendPool {
                 backend_token.clone(),
                 backend_tokens_registry,
                 subscribers_registry,
+                poll_registry,
                 next_socket_index,
                 self.config.timeout,
                 self.config.failure_limit,
@@ -108,13 +109,13 @@ impl BackendPool {
         };
 
         debug!("Setup backend listener: {:?}", self.token);
-        poll.register(&server_socket, self.token, Ready::readable(), PollOpt::edge()).unwrap();
+        poll_registry.borrow_mut().register(&server_socket, self.token, Ready::readable(), PollOpt::edge()).unwrap();
         subscribers_registry.borrow_mut().insert(self.token, Subscriber::PoolListener);
         self.listen_socket = Some(server_socket);
 
         // Connect backends.
         for (_, backend) in &mut self.backend_map {
-            backend.connect(poll);
+            backend.connect();
         }
     }
 
@@ -215,7 +216,7 @@ impl BackendPool {
         &mut self,
         next_socket_index: &Rc<Cell<usize>>,
         subscribers: &mut HashMap<Token, Subscriber>,
-        poll: &mut Poll,
+        poll: &Rc<RefCell<Poll>>,
         pool_token: Token
     ) {
         let socket = {    
@@ -237,7 +238,7 @@ impl BackendPool {
             }
         };
         let client_token = generate_client_token(next_socket_index);
-        match poll.register(&socket, client_token, Ready::readable(), PollOpt::edge()) {
+        match poll.borrow_mut().register(&socket, client_token, Ready::readable(), PollOpt::edge()) {
             Ok(_) => {
 
                 self.client_sockets.insert(client_token, BufStream::new(socket));
@@ -313,10 +314,9 @@ impl BackendPool {
     // Fired when a reconnect is desired.
     pub fn handle_reconnect(
         &mut self,
-        poll: &mut Poll,
         backend_token: Token
     ) {
-        self.get_backend(backend_token).connect(poll);
+        self.get_backend(backend_token).connect();
         info!("Attempted to reconnect: {:?}", &backend_token);
     }
 

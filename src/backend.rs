@@ -40,6 +40,7 @@ impl Backend {
         token: Token,
         backend_tokens_registry: &Rc<RefCell<HashMap<Token, Token>>>,
         subscribers_registry: &Rc<RefCell<HashMap<Token, Subscriber>>>,
+        poll_registry: &Rc<RefCell<Poll>>,
         next_socket_index: &Rc<Cell<usize>>,
         timeout: usize,
         failure_limit: usize,
@@ -56,6 +57,7 @@ impl Backend {
                     host,
                     token,
                     subscribers_registry,
+                    poll_registry,
                     timeout,
                     failure_limit,
                     retry_timeout,
@@ -70,6 +72,7 @@ impl Backend {
                     token,
                     backend_tokens_registry,
                     subscribers_registry,
+                    poll_registry,
                     next_socket_index,
                     timeout,
                     failure_limit,
@@ -93,10 +96,10 @@ impl Backend {
         }
     }
 
-    pub fn connect(&mut self, poll: &mut Poll) {
+    pub fn connect(&mut self) {
         match self.single {
-            BackendEnum::Single(ref mut backend) => backend.connect(poll),
-            BackendEnum::Cluster(ref mut backend) => backend.connect(poll),
+            BackendEnum::Single(ref mut backend) => backend.connect(),
+            BackendEnum::Cluster(ref mut backend) => backend.connect(),
         }
     }
 
@@ -141,20 +144,18 @@ impl Backend {
         }
     }
 
-    pub fn handle_backend_response(&mut self, token: Token, 
-        poll: &mut Poll) {
+    pub fn handle_backend_response(&mut self, token: Token) {
         match self.single {
             BackendEnum::Single(ref mut backend) => backend.handle_backend_response(),
-            BackendEnum::Cluster(ref mut backend) => backend.handle_backend_response(token, poll),
+            BackendEnum::Cluster(ref mut backend) => backend.handle_backend_response(token),
         }
     }
 
     pub fn handle_backend_failure(&mut self, token: Token,
-        poll: &mut Poll,
     ) {
         match self.single {
-            BackendEnum::Single(ref mut backend) => backend.handle_backend_failure(poll),
-            BackendEnum::Cluster(ref mut backend) => backend.handle_backend_failure(token, poll),
+            BackendEnum::Single(ref mut backend) => backend.handle_backend_failure(),
+            BackendEnum::Cluster(ref mut backend) => backend.handle_backend_failure(token, ),
         }
     }
 }
@@ -171,6 +172,7 @@ pub struct SingleBackend {
     config: BackendConfig,
     parent: *mut BackendPool,
     subscribers_registry: Rc<RefCell<HashMap<Token, Subscriber>>>,
+    poll_registry: Rc<RefCell<Poll>>,
     written_sockets: *mut VecDeque<(Token, StreamType)>,
     socket: Option<BufStream<TcpStream>>,
     timer: Option<Timer<()>>,
@@ -182,6 +184,7 @@ impl SingleBackend {
         host: String,
         token: Token,
         subscribers_registry: &Rc<RefCell<HashMap<Token, Subscriber>>>,
+        poll_registry: &Rc<RefCell<Poll>>,
         timeout: usize,
         failure_limit: usize,
         retry_timeout: usize,
@@ -197,6 +200,7 @@ impl SingleBackend {
             status: BackendStatus::DISCONNECTED,
             timeout: timeout,
             subscribers_registry: Rc::clone(subscribers_registry),
+            poll_registry: Rc::clone(poll_registry),
             failure_limit: failure_limit,
             retry_timeout: retry_timeout,
             failure_count: 0,
@@ -216,7 +220,6 @@ impl SingleBackend {
 
     pub fn connect(
         &mut self,
-        poll: &mut Poll,
     ) {
         if self.status == BackendStatus::CONNECTED {
             debug!("Trying to connect when already connected!");
@@ -235,7 +238,7 @@ impl SingleBackend {
         self.change_state(BackendStatus::CONNECTING);
 
         debug!("Registered backend: {:?}", &self.token);
-        poll.register(&socket, self.token, Ready::readable() | Ready::writable(), PollOpt::edge()).unwrap();
+        self.poll_registry.borrow_mut().register(&socket, self.token, Ready::readable() | Ready::writable(), PollOpt::edge()).unwrap();
         self.socket = Some(BufStream::new(socket));
         self.subscribers_registry.borrow_mut().insert(self.token, Subscriber::PoolServer(self.parent_token()));
     }
@@ -364,21 +367,20 @@ impl SingleBackend {
         }
     }
 
-    pub fn handle_backend_failure(&mut self, poll: &mut Poll) {
+    pub fn handle_backend_failure(&mut self) {
         self.mark_backend_down();
-        self.retry_connect(poll);
+        self.retry_connect();
     }
 
     fn retry_connect(
         &mut self,
-        poll: &mut Poll,
     ) {
         debug!("Creating timer");
         // Create new timer.
         let mut timer = Timer::default();
         let _ = timer.set_timeout(Duration::new(0, (1000000 * self.retry_timeout) as u32), ());
         let timer_token = Token(self.token.0 + 1);
-        poll.register(&timer, timer_token, Ready::readable(), PollOpt::level()).unwrap();
+        self.poll_registry.borrow_mut().register(&timer, timer_token, Ready::readable(), PollOpt::level()).unwrap();
         // need to handle with specific function for token. How to know what token this is?
         // can stuff into sockets. but it'll ahve timer token.
         self.timer = Some(timer);
@@ -435,13 +437,16 @@ impl SingleBackend {
     }
 
     fn write_to_client(&mut self, client_token: Token, message: String) {
+        if client_token == NULL_TOKEN {
+            return;
+        }
         match self.parent_clients().get_mut(&client_token) {
             Some(stream) => {
                 debug!("Wrote to client {:?}: {:?}", client_token, message);
                 let _ = stream.write(&message.into_bytes()[..]);
                 self.register_written_socket(client_token, StreamType::PoolClient);
             }
-            _ => panic!("Found listener instead of stream!"),
+            _ => panic!("Found listener instead of stream! for clienttoken {:?}", client_token),
         }
     }
 
@@ -465,7 +470,7 @@ impl SingleBackend {
             let mut timer = Timer::default();
             let _ = timer.set_timeout(Duration::from_millis(self.timeout as u64), ());
             let timer_token = self.get_timeout_token();
-            poll.register(&timer, timer_token, Ready::readable(), PollOpt::level()).unwrap();
+            self.poll_registry.borrow_mut().register(&timer, timer_token, Ready::readable(), PollOpt::level()).unwrap();
             // need to handle with specific function for token. How to know what token this is?
             // can stuff into sockets. but it'll ahve timer token.
             self.timer = Some(timer);

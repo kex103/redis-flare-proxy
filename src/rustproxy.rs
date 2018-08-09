@@ -77,20 +77,20 @@ pub struct RustProxy {
     backend_tokens: Rc<RefCell<HashMap<BackendToken, PoolToken>>>,
     subscribers: Rc<RefCell<HashMap<Token, Subscriber>>>,
     pub written_sockets: Box<VecDeque<(Token, StreamType)>>,
-    poll: Poll,
+    poll: Rc<RefCell<Poll>>,
     next_socket_index: Rc<Cell<usize>>,
 }
 impl RustProxy {
     pub fn new(config_path: String) -> Result<RustProxy, String> {
         let config = try!(load_config(config_path));
         let poll = match Poll::new() {
-            Ok(poll) => poll,
+            Ok(poll) => Rc::new(RefCell::new(poll)),
             Err(error) => {
                 return Err(format!("Failed to init poll: {:?}", error));
             }
         };
         let subscribers = Rc::new(RefCell::new(HashMap::new()));
-        let admin = admin::AdminPort::new(config.admin.clone(), &poll, &mut subscribers.borrow_mut());
+        let admin = admin::AdminPort::new(config.admin.clone(), &poll.borrow(), &mut subscribers.borrow_mut());
 
         let mut rustproxy = RustProxy {
             admin: admin,
@@ -134,7 +134,7 @@ impl RustProxy {
 
         // Replace admin.
         if self.config.admin != self.admin.config {
-            let admin = admin::AdminPort::new(self.config.admin.clone(), &self.poll, &mut self.subscribers.borrow_mut());
+            let admin = admin::AdminPort::new(self.config.admin.clone(), &self.poll.borrow(), &mut self.subscribers.borrow_mut());
             self.admin = admin; // TODO: what to do with old admin?
         }
 
@@ -176,12 +176,13 @@ impl RustProxy {
     pub fn run(&mut self) {
         let mut events = Events::with_capacity(1024);
         loop {
-            match self.poll.poll(&mut events, None) {
+            {
+            match self.poll.borrow_mut().poll(&mut events, None) {
                 Ok(_poll_size) => {}
                 Err(error) => {
                     panic!("Error polling. Shutting down: {:?}", error);
                 }
-            };
+            };}
             for event in events.iter() {
                 debug!("Event detected: {:?} {:?}", &event.token(), event.readiness());
                 self.handle_event(&event);
@@ -273,7 +274,7 @@ impl RustProxy {
                     return;
                 }
             };
-            backend.handle_backend_failure(token, &mut self.poll);
+            backend.handle_backend_failure(token);
             return;
         }
         let subscriber = match self.subscribers.borrow().get(&token) {
@@ -290,7 +291,7 @@ impl RustProxy {
                 match self.backendpools.get_mut(&pool_token.clone()) {
                     Some(pool) => {
                         let backend_token = Token(token.0 - 1);
-                        pool.handle_reconnect(&mut self.poll, backend_token)
+                        pool.handle_reconnect(backend_token)
                     }
                     None => error!("Hashmap says it has token but it really doesn't! {:?}",subscriber),
                 }
@@ -308,7 +309,7 @@ impl RustProxy {
             Subscriber::PoolListener => {
                 debug!("PoolListener {:?}", token);
                 match self.backendpools.get_mut(&token) {
-                    Some(pool) => pool.accept_client_connection(&self.next_socket_index, &mut self.subscribers.borrow_mut(), &mut self.poll, token),
+                    Some(pool) => pool.accept_client_connection(&self.next_socket_index, &mut self.subscribers.borrow_mut(), &self.poll, token),
                     None => error!("Hashmap says it has token but it really doesn't!"),
                 }
             }
@@ -322,7 +323,7 @@ impl RustProxy {
             Subscriber::PoolServer(pool_token) => {
                 debug!("PoolServer {:?} for Pool {:?}", token, pool_token);
                 match self.backendpools.get_mut(&pool_token) {
-                    Some(pool) => pool.get_backend(token).handle_backend_response(token, &mut self.poll),
+                    Some(pool) => pool.get_backend(token).handle_backend_response(token),
                     None => error!("Hashmap says it has token but it really doesn't!"),
                 }
             }
@@ -332,7 +333,7 @@ impl RustProxy {
             }
             Subscriber::AdminListener => {
                 debug!("AdminListener {:?}", token);
-                self.admin.accept_client_connection(&self.next_socket_index, &mut self.poll, &mut self.subscribers.borrow_mut());
+                self.admin.accept_client_connection(&self.next_socket_index, &mut self.poll.borrow_mut(), &mut self.subscribers.borrow_mut());
             }
         }
         return;
