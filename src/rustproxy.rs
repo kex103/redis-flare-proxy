@@ -306,27 +306,32 @@ impl RustProxy {
                 }
             }
             Subscriber::PoolListener => {
+                debug!("PoolListener {:?}", token);
                 match self.backendpools.get_mut(&token) {
                     Some(pool) => pool.accept_client_connection(&self.next_socket_index, &mut self.subscribers.borrow_mut(), &mut self.poll, token),
                     None => error!("Hashmap says it has token but it really doesn't!"),
                 }
             }
-            Subscriber::AdminClient => {
-                self.handle_client_socket(token);
-            }
             Subscriber::PoolClient(pool_token) => {
+                debug!("PoolClient {:?} for Pool {:?}", token, pool_token);
                 match self.backendpools.get_mut(&pool_token) {
                     Some(pool) => pool.handle_client_readable(&mut self.written_sockets, token),
                     None => error!("Hashmap says it has token but it really doesn't!"),
                 }
             }
             Subscriber::PoolServer(pool_token) => {
+                debug!("PoolServer {:?} for Pool {:?}", token, pool_token);
                 match self.backendpools.get_mut(&pool_token) {
                     Some(pool) => pool.get_backend(token).handle_backend_response(token, &mut self.poll),
                     None => error!("Hashmap says it has token but it really doesn't!"),
                 }
             }
+            Subscriber::AdminClient => {
+                debug!("AdminClient {:?}", token);
+                self.handle_client_socket(token);
+            }
             Subscriber::AdminListener => {
+                debug!("AdminListener {:?}", token);
                 self.admin.accept_client_connection(&self.next_socket_index, &mut self.poll, &mut self.subscribers.borrow_mut());
             }
         }
