@@ -462,9 +462,16 @@ impl SingleBackend {
         let timestamp = now + Duration::from_millis(self.timeout as u64);
         self.queue.push_back((client_token, timestamp));
         if self.queue.len() == 1 {
+            let mut timer = Timer::default();
+            let _ = timer.set_timeout(Duration::from_millis(self.timeout as u64), ());
+            let timer_token = self.get_timeout_token();
+            poll.register(&timer, timer_token, Ready::readable(), PollOpt::level()).unwrap();
+            // need to handle with specific function for token. How to know what token this is?
+            // can stuff into sockets. but it'll ahve timer token.
+            self.timer = Some(timer);
+
             self.subscribers_registry.borrow_mut().insert(self.get_timeout_token(), Subscriber::RequestTimeout(self.parent_token(), timestamp));
         }
-        // TODO: Now we need to handle the requesttimeouts better (update next timeout, and clean up the queue when a response is received)
     }
 
     pub fn get_backend_response(&mut self) -> String {
