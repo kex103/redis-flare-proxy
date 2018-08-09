@@ -1,4 +1,4 @@
-use rustproxy::{TimeoutQueue, StreamType, NULL_TOKEN, Subscriber};
+use rustproxy::{StreamType, NULL_TOKEN, Subscriber};
 use config::BackendConfig;
 use backendpool::{BackendPool, parse_redis_response};
 use bufstream::BufStream;
@@ -17,15 +17,13 @@ use cluster_backend::{ClusterBackend};
 
 
 #[derive(Clone, Copy, Debug, PartialEq)]
-pub enum Status {
+pub enum BackendStatus {
     CONNECTED,
     DISCONNECTED,
     CONNECTING,
     LOADING,
 }
 pub type Host = String;
-
-
 
 enum BackendEnum {
     Single(SingleBackend),
@@ -41,6 +39,7 @@ impl Backend {
         config: BackendConfig,
         token: Token,
         backend_tokens_registry: &Rc<RefCell<HashMap<Token, Token>>>,
+        subscribers_registry: &Rc<RefCell<HashMap<Token, Subscriber>>>,
         next_socket_index: &Rc<Cell<usize>>,
         timeout: usize,
         failure_limit: usize,
@@ -52,11 +51,32 @@ impl Backend {
         let (backend, all_backend_tokens) = match config.use_cluster {
             false => {
                 let host = config.host.clone().unwrap().clone();
-                let (backend, tokens) = SingleBackend::new(config, host, token, timeout, failure_limit, retry_timeout, pool, written_sockets);
+                let (backend, tokens) = SingleBackend::new(
+                    config,
+                    host,
+                    token,
+                    subscribers_registry,
+                    timeout,
+                    failure_limit,
+                    retry_timeout,
+                    pool,
+                    written_sockets
+                );
                 (BackendEnum::Single(backend), tokens)
             }
             true => {
-                let (backend, tokens) = ClusterBackend::new(config, token, backend_tokens_registry, next_socket_index, timeout, failure_limit, retry_timeout, pool, written_sockets);
+                let (backend, tokens) = ClusterBackend::new(
+                    config,
+                    token,
+                    backend_tokens_registry,
+                    subscribers_registry,
+                    next_socket_index,
+                    timeout,
+                    failure_limit,
+                    retry_timeout,
+                    pool,
+                    written_sockets
+                );
                 (BackendEnum::Cluster(backend), tokens)
             }
         };
@@ -73,10 +93,10 @@ impl Backend {
         }
     }
 
-    pub fn connect(&mut self, poll: &mut Poll, subscribers: &mut HashMap<Token, Subscriber>) {
+    pub fn connect(&mut self, poll: &mut Poll) {
         match self.single {
-            BackendEnum::Single(ref mut backend) => backend.connect(poll, subscribers),
-            BackendEnum::Cluster(ref mut backend) => backend.connect(poll, subscribers),
+            BackendEnum::Single(ref mut backend) => backend.connect(poll),
+            BackendEnum::Cluster(ref mut backend) => backend.connect(poll),
         }
     }
 
@@ -87,33 +107,30 @@ impl Backend {
         }
     }
 
-    pub fn handle_timeout(&mut self, token: Token, written_sockets: &mut VecDeque<(Token, StreamType)>, timestamp: Instant) -> bool {
+    pub fn handle_timeout(&mut self, token: Token, timestamp: Instant) -> bool {
         match self.single {
-            BackendEnum::Single(ref mut backend) => backend.handle_timeout(written_sockets, timestamp),
-            BackendEnum::Cluster(ref mut backend) => backend.handle_timeout(token, written_sockets, timestamp),
+            BackendEnum::Single(ref mut backend) => backend.handle_timeout(timestamp),
+            BackendEnum::Cluster(ref mut backend) => backend.handle_timeout(token, timestamp),
         }
     }
 
     
     pub fn mark_backend_down(
         &mut self,
-        subscribers: &mut HashMap<Token, Subscriber>,
-        written_sockets: &mut VecDeque<(Token, StreamType)>
     ) {
         match self.single {
-            BackendEnum::Single(ref mut backend) => backend.mark_backend_down(subscribers, written_sockets),
+            BackendEnum::Single(ref mut backend) => backend.mark_backend_down(),
             BackendEnum::Cluster(ref mut _backend) => panic!("unimplemented")
         }
     }
 
-    pub fn write(&mut self,
+    pub fn write_message(&mut self,
         message: String,
-        timeout_queue: &mut TimeoutQueue,
         client_token: Token
     ) -> bool {
         match self.single {
-            BackendEnum::Single(ref mut backend) => backend.write(message, client_token),
-            BackendEnum::Cluster(ref mut backend) => backend.write(message, timeout_queue, client_token),
+            BackendEnum::Single(ref mut backend) => backend.write_message(message, client_token),
+            BackendEnum::Cluster(ref mut backend) => backend.write_message(message, client_token),
         }
     }
 
@@ -125,29 +142,26 @@ impl Backend {
     }
 
     pub fn handle_backend_response(&mut self, token: Token, 
-        poll: &mut Poll,
-        subscribers: &mut HashMap<Token, Subscriber>,) {
+        poll: &mut Poll) {
         match self.single {
             BackendEnum::Single(ref mut backend) => backend.handle_backend_response(),
-            BackendEnum::Cluster(ref mut backend) => backend.handle_backend_response(token, poll, subscribers),
+            BackendEnum::Cluster(ref mut backend) => backend.handle_backend_response(token, poll),
         }
     }
 
     pub fn handle_backend_failure(&mut self, token: Token,
-        subscribers: &mut HashMap<Token, Subscriber>,
-        written_sockets: &mut VecDeque<(Token, StreamType)>,
         poll: &mut Poll,
     ) {
         match self.single {
-            BackendEnum::Single(ref mut backend) => backend.handle_backend_failure(subscribers, written_sockets, poll),
-            BackendEnum::Cluster(ref mut backend) => backend.handle_backend_failure(token, subscribers, written_sockets, poll),
+            BackendEnum::Single(ref mut backend) => backend.handle_backend_failure(poll),
+            BackendEnum::Cluster(ref mut backend) => backend.handle_backend_failure(token, poll),
         }
     }
 }
 
 pub struct SingleBackend {
     token: Token,
-    status: Status,
+    status: BackendStatus,
     pub weight: usize,
     host: String,
     pub queue: VecDeque<(Token, Instant)>,
@@ -156,6 +170,7 @@ pub struct SingleBackend {
     failure_count: usize,
     config: BackendConfig,
     parent: *mut BackendPool,
+    subscribers_registry: Rc<RefCell<HashMap<Token, Subscriber>>>,
     written_sockets: *mut VecDeque<(Token, StreamType)>,
     socket: Option<BufStream<TcpStream>>,
     timer: Option<Timer<()>>,
@@ -166,6 +181,7 @@ impl SingleBackend {
         config: BackendConfig,
         host: String,
         token: Token,
+        subscribers_registry: &Rc<RefCell<HashMap<Token, Subscriber>>>,
         timeout: usize,
         failure_limit: usize,
         retry_timeout: usize,
@@ -178,8 +194,9 @@ impl SingleBackend {
             host : host,
             token : token,
             queue: VecDeque::with_capacity(4096),
-            status: Status::DISCONNECTED,
+            status: BackendStatus::DISCONNECTED,
             timeout: timeout,
+            subscribers_registry: Rc::clone(subscribers_registry),
             failure_limit: failure_limit,
             retry_timeout: retry_timeout,
             failure_count: 0,
@@ -194,15 +211,14 @@ impl SingleBackend {
     }
 
     pub fn is_available(&mut self) -> bool {
-        return self.status == Status::CONNECTED;
+        return self.status == BackendStatus::CONNECTED;
     }
 
     pub fn connect(
         &mut self,
         poll: &mut Poll,
-        subscribers: &mut HashMap<Token, Subscriber>,
     ) {
-        if self.status == Status::CONNECTED {
+        if self.status == BackendStatus::CONNECTED {
             debug!("Trying to connect when already connected!");
             return;
         }
@@ -216,12 +232,12 @@ impl SingleBackend {
         // Setup the server socket
         let socket = TcpStream::connect(&addr).unwrap();
 
-        self.change_state(Status::CONNECTING);
+        self.change_state(BackendStatus::CONNECTING);
 
         debug!("Registered backend: {:?}", &self.token);
         poll.register(&socket, self.token, Ready::readable() | Ready::writable(), PollOpt::edge()).unwrap();
         self.socket = Some(BufStream::new(socket));
-        subscribers.insert(self.token, Subscriber::PoolServer(self.parent_token()));
+        self.subscribers_registry.borrow_mut().insert(self.token, Subscriber::PoolServer(self.parent_token()));
     }
 
     // Callback after initializing a connection.
@@ -248,11 +264,13 @@ impl SingleBackend {
     // Returns a boolean, signifying whether to mark this backend as down or not.
     pub fn handle_timeout(
         &mut self,
-        _written_sockets: &mut VecDeque<(Token, StreamType)>,
         timestamp: Instant
     ) -> bool {
         debug!("Handling timeout: {:?}", self.token);
-        if self.status == Status::DISCONNECTED {
+        if self.status == BackendStatus::DISCONNECTED {
+            return false;
+        }
+        if self.queue.len() == 0 {
             return false;
         }
         let head = {
@@ -275,36 +293,32 @@ impl SingleBackend {
             }
         }
         else {
-            panic!("This shouldn't be happening. Timestamp hit: {:?}. Missed previous timestamp: {:?}", timestamp, time);
+            panic!("This shouldn't happen. Timestamp hit: {:?}. Missed previous timestamp: {:?}", timestamp, time);
         }
         return false;
     }
 
     // Marks the backend as down. Returns an error message to all pending requests.
-    pub fn mark_backend_down(
-        &mut self,
-        subscribers: &mut HashMap<Token, Subscriber>,
-        written_sockets: &mut VecDeque<(Token, StreamType)>
-    ) {
-        if self.status == Status::CONNECTED {
-            subscribers.remove(&Token(self.token.0 - 1));
-            // Point of cleaning this up is so that we don't try to reconnect too soon after we successfully connect and fail.
+    pub fn mark_backend_down(&mut self) {
+        if self.status == BackendStatus::CONNECTED {
+            self.subscribers_registry.borrow_mut().remove(&Token(self.token.0 - 1));
+            // Point of cleaning this up is so that we don't try to reconnect too soon after we successfully connect
+            // and fail.
         }
-        self.change_state(Status::DISCONNECTED);
+        self.change_state(BackendStatus::DISCONNECTED);
         let mut possible_token = self.queue.pop_front();
         loop {
             match possible_token {
                 Some((NULL_TOKEN, _)) => {}
                 Some((client_token, _)) => {
-                    let client_stream = self.parent_clients().get_mut(&client_token).unwrap();
-                    write_to_client2(client_stream, &client_token, written_sockets, StreamType::PoolClient, "-ERR: Unavailable backend.\r\n".to_owned());
+                    self.write_to_client(client_token, "-ERR: Unavailable backend.\r\n".to_owned());
                 }
                 None => break,
             }
             possible_token = self.queue.pop_front();
         }
         self.socket = None;
-        subscribers.remove(&self.token);
+        self.subscribers_registry.borrow_mut().remove(&self.token);
     }
 
     pub fn flush_stream(&mut self) {
@@ -316,12 +330,12 @@ impl SingleBackend {
         }
     }
 
-    pub fn write(&mut self,
+    pub fn write_message(&mut self,
         message: String,
         client_token: Token
     ) -> bool {
         match self.status {
-            Status::CONNECTED => {
+            BackendStatus::CONNECTED => {
                 self.write_to_stream(client_token, message.clone());
                 true
             }
@@ -333,9 +347,9 @@ impl SingleBackend {
     }
 
     pub fn handle_backend_response(&mut self) {
-        self.change_state(Status::CONNECTED);
+        self.change_state(BackendStatus::CONNECTED);
 
-        // TODO: This loop condition doesn't look right. Can't there be requests in-flight in the queue that haven't gotten a response yet?
+        // Read all responses if there are any left.
         while self.queue.len() > 0 {
             let response = self.get_backend_response();
             if response.len() == 0 {
@@ -350,19 +364,14 @@ impl SingleBackend {
         }
     }
 
-    pub fn handle_backend_failure(&mut self,
-        subscribers: &mut HashMap<Token, Subscriber>,
-        written_sockets: &mut VecDeque<(Token, StreamType)>,
-        poll: &mut Poll
-    ) {
-        self.mark_backend_down(subscribers, written_sockets);
-        self.retry_connect(poll, subscribers);
+    pub fn handle_backend_failure(&mut self, poll: &mut Poll) {
+        self.mark_backend_down();
+        self.retry_connect(poll);
     }
 
     fn retry_connect(
         &mut self,
         poll: &mut Poll,
-        subscribers: &mut HashMap<Token, Subscriber>,
     ) {
         debug!("Creating timer");
         // Create new timer.
@@ -376,21 +385,24 @@ impl SingleBackend {
         let parent_token = self.parent_token().clone();
         debug!("Original: {:?}", self.parent_token());
         debug!("Parent token! {:?}", parent_token);
-        subscribers.insert(timer_token, Subscriber::Timeout(parent_token));
+        self.subscribers_registry.borrow_mut().insert(timer_token, Subscriber::Timeout(parent_token));
     }
 
-    pub fn change_state(&mut self, target_state: Status) -> bool {
+    pub fn change_state(&mut self, target_state: BackendStatus) -> bool {
         if self.status == target_state {
             return true;
         }
         match (self.status, target_state) {
-            (Status::DISCONNECTED, Status::CONNECTING) => {} // called when trying to establish a connection to backend.
-            (Status::CONNECTING, Status::CONNECTED) => {
+            // called when trying to establish a connection to backend.
+            (BackendStatus::DISCONNECTED, BackendStatus::CONNECTING) => {}
+            (BackendStatus::CONNECTING, BackendStatus::CONNECTED) => {
                 // call handle_connection.
                 self.handle_connection();
             } // happens when connection to backend has been established and is writable.
-            (Status::CONNECTING, Status::DISCONNECTED) => {} // Happens when the establishing connection to backend has timed out.
-            (Status::CONNECTED, Status::DISCONNECTED) => {} // happens when host has been blacked out from too many failures/timeouts.
+            // Happens when the establishing connection to backend has timed out.
+            (BackendStatus::CONNECTING, BackendStatus::DISCONNECTED) => {}
+            // happens when host has been blacked out from too many failures/timeouts.
+            (BackendStatus::CONNECTED, BackendStatus::DISCONNECTED) => {}
             _ => {
                 debug!("Backend {:?} failed to change state from {:?} to {:?}", self.token, self.status, target_state);
                 panic!("Failure to change states"); //return false;
@@ -436,7 +448,7 @@ impl SingleBackend {
     fn write_to_stream(
         &mut self,
         client_token: Token,
-        message: String
+        message: String,
     ) {
         debug!("Write to backend {:?} {}: {}", &self.token, self.host, &message);
         match self.socket {
@@ -448,7 +460,11 @@ impl SingleBackend {
         self.register_written_socket(self.token.clone(), StreamType::PoolServer);
         let now = Instant::now();
         let timestamp = now + Duration::from_millis(self.timeout as u64);
-        self.queue.push_back((client_token, timestamp)); // I MOVED THIS OUT WITHOUT TIMEOUT. SHOULD IT BE MOVED BACK?
+        self.queue.push_back((client_token, timestamp));
+        if self.queue.len() == 1 {
+            self.subscribers_registry.borrow_mut().insert(self.get_timeout_token(), Subscriber::RequestTimeout(self.parent_token(), timestamp));
+        }
+        // TODO: Now we need to handle the requesttimeouts better (update next timeout, and clean up the queue when a response is received)
     }
 
     pub fn get_backend_response(&mut self) -> String {
@@ -460,11 +476,16 @@ impl SingleBackend {
         debug!("Read from backend: {}", response);
         if response.len() == 0 {
             debug!("Completely empty string response from backend {:?}!", self.socket);
-            // TODO: remote connection can disconnect, and rustproxy won't' detect that it's down until a client attempts to hit it.
+            // TODO: remote connection can disconnect, and rustproxy won't' detect
+            // that it's down until a client attempts to hit it.
             // Should we listen for peer close to mark it early?
             return response;
         }
         return response
+    }
+
+    fn get_timeout_token(&self) -> Token {
+        Token(self.token.0 + 1)
     }
 }
 
@@ -526,28 +547,3 @@ pub fn parse_redis_command(stream: &mut BufStream<TcpStream>) -> String {
     }
     command
 }
-
-//let client_stream = self.parent_clients().get_mut(&client_token).unwrap();
-fn write_to_client2(
-    client_stream: &mut BufStream<TcpStream>,
-    client_token: &Token,
-    written_sockets: &mut VecDeque<(Token, StreamType)>,
-    stream_type: StreamType,
-    message: String
-) {
-    debug!("Wrote to client: {:?}", message);
-    let _ = client_stream.write(&message.into_bytes()[..]);
-    written_sockets.push_back((client_token.clone(), stream_type));
-}
-
-/*
-    fn write_to_client(&mut self, client_token: Token, message: String) {
-        match self.parent_clients().get_mut(&client_token) {
-            Some(stream) => {
-                debug!("Wrote to client {:?}: {:?}", client_token, message);
-                let _ = stream.write(&message.into_bytes()[..]);
-                self.register_written_socket(client_token, StreamType::PoolClient);
-            }
-            _ => panic!("Found listener instead of stream!"),
-        }
-    }*/

@@ -1,5 +1,5 @@
-use rustproxy::{BackendToken, PoolToken, ClientToken, generate_backend_token, StreamType, TimeoutQueue, NULL_TOKEN, Subscriber};
-use backend::{Status, Host, SingleBackend};
+use rustproxy::{BackendToken, PoolToken, ClientToken, generate_backend_token, StreamType, NULL_TOKEN, Subscriber};
+use backend::{BackendStatus, Host, SingleBackend};
 use backendpool::BackendPool;
 use config::BackendConfig;
 use bufstream::BufStream;
@@ -200,7 +200,7 @@ pub struct ClusterBackend {
     hosts: HashMap<BackendToken, SingleBackend>,
     hostnames: HashMap<Host, BackendToken>,
     slots: Vec<Host>,
-    status: Status,
+    status: BackendStatus,
     config: BackendConfig,
     token: BackendToken,
     queue: VecDeque<(ClientToken, Instant)>,
@@ -211,6 +211,7 @@ pub struct ClusterBackend {
     failure_limit: usize,
     retry_timeout: usize,
     backend_tokens_registry: Rc<RefCell<HashMap<BackendToken, PoolToken>>>,
+    subscribers_registry: Rc<RefCell<HashMap<Token, Subscriber>>>,
     next_socket_index: Rc<Cell<usize>>,
 }
 impl ClusterBackend {
@@ -218,6 +219,7 @@ impl ClusterBackend {
         config: BackendConfig,
         token: BackendToken,
         backend_tokens_registry: &Rc<RefCell<HashMap<BackendToken, PoolToken>>>,
+        subscribers_registry: &Rc<RefCell<HashMap<Token, Subscriber>>>,
         next_socket_index: &Rc<Cell<usize>>,
         timeout: usize,
         failure_limit: usize,
@@ -231,7 +233,7 @@ impl ClusterBackend {
             hostnames: HashMap::new(),
             slots: Vec::with_capacity(16384),
             config: config,
-            status: Status::DISCONNECTED,
+            status: BackendStatus::DISCONNECTED,
             token: token,
             queue: VecDeque::new(),
             parent: pool as *mut BackendPool,
@@ -240,6 +242,7 @@ impl ClusterBackend {
             failure_limit: failure_limit,
             retry_timeout: retry_timeout,
             backend_tokens_registry: Rc::clone(backend_tokens_registry),
+            subscribers_registry: Rc::clone(subscribers_registry),
             next_socket_index: Rc::clone(next_socket_index),
         };
         for _ in 0..cluster.slots.capacity() {
@@ -254,6 +257,7 @@ impl ClusterBackend {
                 cluster.config.clone(),
                 host.clone(),
                 backend_token,
+                subscribers_registry,
                 timeout,
                 failure_limit,
                 retry_timeout,
@@ -275,6 +279,7 @@ impl ClusterBackend {
                 self.config.clone(),
                 host.clone(),
                 backend_token,
+                &self.subscribers_registry,
                 self.timeout,
                 self.failure_limit,
                 self.retry_timeout,
@@ -287,38 +292,36 @@ impl ClusterBackend {
     }
  
     pub fn is_available(&mut self) -> bool {
-        return self.status == Status::CONNECTED;
+        return self.status == BackendStatus::CONNECTED;
     }
 
     pub fn connect(
         &mut self,
         poll: &mut Poll,
-        subscribers: &mut HashMap<Token, Subscriber>,
     ) {
         for (ref _host, ref mut backend) in &mut self.hosts {
             debug!("KEX: connecting for a host! {:?}", _host);
-            backend.connect(poll, subscribers);
+            backend.connect(poll);
         }
-        self.change_state(Status::CONNECTING, NULL_TOKEN);
+        self.change_state(BackendStatus::CONNECTING, NULL_TOKEN);
     }
 
     pub fn handle_connection(&mut self, backend_token: Token) {
         let host = self.hosts.get_mut(&backend_token).unwrap();
         //host.handle_connection();
-        host.write("*2\r\n$7\r\nCLUSTER\r\n$5\r\nSLOTS\r\n".to_owned(), NULL_TOKEN);
+        host.write_message("*2\r\n$7\r\nCLUSTER\r\n$5\r\nSLOTS\r\n".to_owned(), NULL_TOKEN);
         self.queue.push_back(host.queue.back().unwrap().clone());
     }
 
     pub fn handle_backend_response(&mut self, token: Token, 
-        poll: &mut Poll,
-        subscribers: &mut HashMap<Token, Subscriber>,) {
+        poll: &mut Poll,) {
         // Grab response.
         // Look up queue. If it is token 0.
         // handle it.
         debug!("KEX: Handling backend response for cluster");
         debug!("Queue: {:?}", self.queue);
-        self.hosts.get_mut(&token).unwrap().change_state(Status::CONNECTED);
-        self.change_state(Status::LOADING, token);
+        self.hosts.get_mut(&token).unwrap().change_state(BackendStatus::CONNECTED);
+        self.change_state(BackendStatus::LOADING, token);
         let response = self.hosts.get_mut(&token).unwrap().get_backend_response();
 
         if response.len() == 0 {
@@ -343,13 +346,13 @@ impl ClusterBackend {
                 if !self.hostnames.contains_key(&host) {
                     self.initialize_host(host.clone());
                     let backend_token = self.hostnames.get(&host).unwrap();
-                    self.hosts.get_mut(backend_token).unwrap().connect(poll, subscribers);
+                    self.hosts.get_mut(backend_token).unwrap().connect(poll);
                     self.register_backend_with_parent(backend_token.clone(), self.token.clone());
                 }
             };
             handle_slotsmap(response.clone(), &mut register_backend);
             }
-            self.change_state(Status::CONNECTED, NULL_TOKEN);
+            self.change_state(BackendStatus::CONNECTED, NULL_TOKEN);
             return;
         }
 
@@ -365,40 +368,38 @@ impl ClusterBackend {
         // Check that backend has information in the socket still.
         if self.queue.len() > 0 {
             debug!("Still ahve leftover in backned!");
-            self.handle_backend_response(token, poll, subscribers);
+            self.handle_backend_response(token, poll);
         }
     }
 
     pub fn handle_backend_failure(&mut self,
         token: BackendToken,
-        subscribers: &mut HashMap<Token, Subscriber>,
-        written_sockets: &mut VecDeque<(Token, StreamType)>,
         poll: &mut Poll,
     ) {
-        self.hosts.get_mut(&token).unwrap().handle_backend_failure(subscribers, written_sockets, poll);
+        self.hosts.get_mut(&token).unwrap().handle_backend_failure(poll);
     }
 
-    fn change_state(&mut self, target_state: Status, backend_token: BackendToken) -> bool {
+    fn change_state(&mut self, target_state: BackendStatus, backend_token: BackendToken) -> bool {
 
         if self.status == target_state {
             return true;
         }
         match (self.status, target_state) {
-            (Status::DISCONNECTED, Status::CONNECTING) => {} // called when trying to establish a connection to backend.
-            (Status::CONNECTING, Status::LOADING) => {
+            (BackendStatus::DISCONNECTED, BackendStatus::CONNECTING) => {} // called when trying to establish a connection to backend.
+            (BackendStatus::CONNECTING, BackendStatus::LOADING) => {
                 self.handle_connection(backend_token);
             }
 
             // State transitions we want to ignore. Why? Because we don't want to keep track of the fact that we're calling a transition to CONNECTED
             // twice. Instead, we'll have subsequent transitions just fail silently.
-            (Status::CONNECTED, Status::LOADING) => {
+            (BackendStatus::CONNECTED, BackendStatus::LOADING) => {
                 return true;
             }
 
-            (Status::LOADING, Status::CONNECTED) => {}
-            (Status::CONNECTING, Status::DISCONNECTED) => {} // Happens when the establishing connection to backend has timed out.
-            (Status::LOADING, Status::DISCONNECTED) => {}
-            (Status::CONNECTED, Status::DISCONNECTED) => {} // happens when host has been blacked out from too many failures/timeouts.
+            (BackendStatus::LOADING, BackendStatus::CONNECTED) => {}
+            (BackendStatus::CONNECTING, BackendStatus::DISCONNECTED) => {} // Happens when the establishing connection to backend has timed out.
+            (BackendStatus::LOADING, BackendStatus::DISCONNECTED) => {}
+            (BackendStatus::CONNECTED, BackendStatus::DISCONNECTED) => {} // happens when host has been blacked out from too many failures/timeouts.
             _ => {
                 debug!("ClusterBackend {:?} failed to change state from {:?} to {:?}", self.token, self.status, target_state);
                 panic!("Failure to change states");
@@ -420,10 +421,9 @@ impl ClusterBackend {
     pub fn handle_timeout(
         &mut self,
         backend_token: Token,
-        written_sockets: &mut VecDeque<(Token, StreamType)>,
         timestamp: Instant
     ) -> bool {
-        self.hosts.get_mut(&backend_token).unwrap().handle_timeout(written_sockets, timestamp);
+        self.hosts.get_mut(&backend_token).unwrap().handle_timeout(timestamp);
         let timeout = self.queue.pop_front().unwrap();
         match timeout.0 {
             NULL_TOKEN => {
@@ -450,15 +450,14 @@ impl ClusterBackend {
         return self.hostnames.get(hostname).unwrap().clone();
     }
 
-    pub fn write(&mut self,
-        message: String, 
-        _timeout_queue: &mut TimeoutQueue,
+    pub fn write_message(&mut self,
+        message: String,
         client_token: Token
     ) -> bool {
         // get the predicted backend to write to.
         let backend_token = self.get_shard(message.clone());
         debug!("Cluster Writing to {:?}. Source: {:?}", backend_token, client_token);
-        let result = self.hosts.get_mut(&backend_token).unwrap().write(message, client_token);
+        let result = self.hosts.get_mut(&backend_token).unwrap().write_message(message, client_token);
         if result {
             self.queue.push_back(self.hosts.get(&backend_token).unwrap().queue.back().unwrap().clone());
             return true;

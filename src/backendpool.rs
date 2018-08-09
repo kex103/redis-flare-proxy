@@ -1,4 +1,6 @@
-use rustproxy::{TimeoutQueue, StreamType, Subscriber};
+use rustproxy::BackendToken;
+use rustproxy::PoolToken;
+use rustproxy::{StreamType, Subscriber};
 use rustproxy::{generate_backend_token, generate_client_token};
 use config::{Distribution, BackendPoolConfig};
 use backend::{Backend};
@@ -63,10 +65,10 @@ impl BackendPool {
 
     pub fn connect(
         &mut self,
-        backend_tokens_registry: &Rc<RefCell<HashMap<Token, Token>>>,
+        backend_tokens_registry: &Rc<RefCell<HashMap<BackendToken, PoolToken>>>,
         next_socket_index: &Rc<Cell<usize>>,
         poll: &mut Poll,
-        subscribers: &mut HashMap<Token, Subscriber>,
+        subscribers_registry: &Rc<RefCell<HashMap<Token, Subscriber>>>,
         written_sockets: &mut VecDeque<(Token, StreamType)>,
     ) {
         // Initialize backends.
@@ -76,6 +78,7 @@ impl BackendPool {
                 backend_config,
                 backend_token.clone(),
                 backend_tokens_registry,
+                subscribers_registry,
                 next_socket_index,
                 self.config.timeout,
                 self.config.failure_limit,
@@ -106,12 +109,12 @@ impl BackendPool {
 
         debug!("Setup backend listener: {:?}", self.token);
         poll.register(&server_socket, self.token, Ready::readable(), PollOpt::edge()).unwrap();
-        subscribers.insert(self.token, Subscriber::PoolListener);
+        subscribers_registry.borrow_mut().insert(self.token, Subscriber::PoolListener);
         self.listen_socket = Some(server_socket);
 
         // Connect backends.
         for (_, backend) in &mut self.backend_map {
-            backend.connect(poll, subscribers);
+            backend.connect(poll);
         }
     }
 
@@ -182,13 +185,11 @@ impl BackendPool {
 
     pub fn handle_timeout(
         &mut self,
-        subscribers: &mut HashMap<Token, Subscriber>,
-        written_sockets: &mut VecDeque<(Token, StreamType)>,
-        token: Token,
+        backend_token: Token,
         timestamp: Instant
     ) {
-        if self.get_backend(token).handle_timeout(token, written_sockets, timestamp) {
-            self.mark_backend_down(token, subscribers, written_sockets);
+        if self.get_backend(backend_token).handle_timeout(backend_token, timestamp) {
+            self.mark_backend_down(backend_token);
         }
     }
 
@@ -199,10 +200,8 @@ impl BackendPool {
     fn mark_backend_down(
         &mut self,
         token: Token,
-        subscribers: &mut HashMap<Token, Subscriber>,
-        written_sockets: &mut VecDeque<(Token, StreamType)>
     ) {
-        self.get_backend(token).mark_backend_down(subscribers, written_sockets);
+        self.get_backend(token).mark_backend_down();
         if self.config.auto_eject_hosts {
             self.rebuild_pool_sharding();
         }
@@ -251,14 +250,13 @@ impl BackendPool {
         };
 
         // Try again to see if there were multiple pending client connections.
-        // TODO: Should get a new client_token
+        // TODO: Should try using the TcpListener.incoming() iterator instead of being recursive?
         self.accept_client_connection(next_socket_index, subscribers, poll, pool_token);
     }
 
-    pub fn handle_client(
+    pub fn handle_client_readable(
         &mut self,
         written_sockets: &mut VecDeque<(Token, StreamType)>,
-        timeout_queue: &mut TimeoutQueue,
         client_token: Token
     ) {
         debug!("Handling client: {:?}", &client_token);
@@ -302,21 +300,12 @@ impl BackendPool {
         // Or it has its own.
         let success = {
             let backend = self.shard(&string).unwrap();
-            backend.write(string, timeout_queue, client_token)
+            backend.write_message(string, client_token)
         };
 
         if !success {
             let string = "-ERROR: Not connected\r\n".to_owned();
-            match self.client_sockets.get_mut(&client_token) {
-                Some(stream) => {
-                    debug!("Writing back to client: {:?} {}", &client_token, string);
-                    let _ = stream.write(&string.into_bytes()[..]);
-                    written_sockets.push_back((client_token.clone(), StreamType::PoolClient));
-                }
-                None => {
-                    error!("Found listener instead of stream!");
-                }
-            }
+            self.write_to_client(client_token, string.to_owned(), written_sockets);
         }
         debug!("All done handling client!");
     }
@@ -325,11 +314,21 @@ impl BackendPool {
     pub fn handle_reconnect(
         &mut self,
         poll: &mut Poll,
-        subscribers: &mut HashMap<Token, Subscriber>,
         backend_token: Token
     ) {
-        self.get_backend(backend_token).connect(poll, subscribers);
+        self.get_backend(backend_token).connect(poll);
         info!("Attempted to reconnect: {:?}", &backend_token);
+    }
+
+    fn write_to_client(&mut self, client_token: Token, message: String, written_sockets: &mut VecDeque<(Token, StreamType)>,) {
+        match self.client_sockets.get_mut(&client_token) {
+            Some(stream) => {
+                debug!("Wrote to client {:?}: {:?}", client_token, message);
+                let _ = stream.write(&message.into_bytes()[..]);
+                written_sockets.push_back((client_token.clone(), StreamType::PoolClient));
+            }
+            _ => panic!("Found listener instead of stream!"),
+        }
     }
 }
 

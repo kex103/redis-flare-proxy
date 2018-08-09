@@ -38,4 +38,4 @@ Admin port pros/cons:
     2. 
 ## TODO:
 1. finish benchmarking? It seems to be working. what else?
-2. 
+2. refactor out the written_sockets/subscribers junk. Should be explicit, or should pass it in as a thing?

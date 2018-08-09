@@ -6,6 +6,7 @@ import os
 import sys
 import time
 import unittest
+import socket
 
 def get_script_path():
     return os.path.dirname(os.path.realpath(sys.argv[0]))
@@ -52,26 +53,14 @@ def expect_redis_key(port, key="test_key", data="value"):
     except redis.exceptions.ConnectionError, e:
         raise AssertionError("Failed to connect to port: {}".format(port))
 
-def verify_no_redis_connection(port):
-    try:
-        r = redis.Redis(port=port, socket_timeout=1)
-        if r.ping():
-            raise AssertionError("Ping was successful!");
-        return True
-    except redis.exceptions.ConnectionError, e:
-        return True
-    except redis.exceptions.TimeoutError, e:
-        return True
-
 def verify_redis_error(port, message):
     try:
         r = redis.Redis(port=port, socket_timeout=1)
-        if r.get("hi"):
-            raise AssertionError("Ping was successful!");
-        return False
+        r.get("hi")
+        raise AssertionError("Expected error '{}' did not occur.".format(message))
     except redis.exceptions.ResponseError, e:
-        return str(e) == message
-    return False
+        if str(e) != message:
+            raise AssertionError("Expected '{}', received '{}' instead".format(message, str(e)))
 
 class TestRustProxy(unittest.TestCase):
     subprocesses = []
@@ -79,12 +68,9 @@ class TestRustProxy(unittest.TestCase):
 
     @classmethod
     def setupClass(self):
-        print("starting build")
         build_rustproxy()
-        print("finished build")
 
     def setUp(self):
-        #build_rustproxy()
         log_file = "tests/log/{}.log".format(self.id())
         try:
             os.remove(log_file)
@@ -94,6 +80,15 @@ class TestRustProxy(unittest.TestCase):
         for f in files:
             if not os.path.isdir(f) and ".conf" in f:
                 os.remove("tests/tmp/{}".format(f))
+
+        kill_redis_server(6380)
+        kill_redis_server(6381)
+        kill_redis_server(6382)
+        kill_redis_server(6383)
+        kill_redis_server(6384)
+        kill_redis_server(7000)
+        kill_redis_server(7001)
+        kill_redis_server(7002)
 
     def tearDown(self):
         for proxy_admin_port in self.proxy_admin_ports:
@@ -145,7 +140,7 @@ class TestRustProxy(unittest.TestCase):
                 raise AssertionError('Redis cluster server {} failed to add slot {}. Stopping test.'.format(ports[port_index], i))
         time.sleep(1.0);
 
-    def start_rustproxy(self, config_path, log_name):
+    def start_rustproxy(self, config_path):
         log_file = "tests/log/{}.log".format(self.id())
         log_out = open("tests/log/{}.log.stdout".format(self._testMethodName), 'w')
         args = ["-c{}".format(
@@ -160,46 +155,58 @@ class TestRustProxy(unittest.TestCase):
         # Get the port name to remove.
         self.proxy_admin_ports.append(1530)
 
-    def start_delayer(self, incoming_port, outgoing_port, delay):
+    def start_delayer(self, incoming_port, outgoing_port, delay, admin_port=None):
         FNULL = open(os.devnull, 'w')
-        process = subprocess.Popen(["python", "tests/delayed_responder.py", "{}".format(incoming_port), "{}".format(outgoing_port), "{}".format(delay)], stdout=FNULL)
+        process = subprocess.Popen(["python", "tests/delayed_responder.py", str(incoming_port), str(outgoing_port), str(delay), str(admin_port)], stdout=FNULL)
         self.subprocesses.append(process)
 
 
     def test_single_backend_no_timeout(self):
-        # Test successful basic, single backend, no timeout.
-        kill_redis_server(6380)
-
-        # make sure redis server is up and running.
         self.start_redis_server(6380)
+        self.start_rustproxy("tests/conf/testconfig1.toml")
 
-        self.start_rustproxy("tests/conf/testconfig1.toml", "basic_test")
-
-        # Verify connection to redis-server and proxy.
         verify_redis_connection(1531)
 
     def test_single_backend_with_timeout(self):
-        kill_redis_server(6380)
-        kill_redis_server(6381)
-
         self.start_redis_server(6381)
-
         self.start_delayer(6380, 6381, 99)
+        self.start_rustproxy("tests/conf/timeout1.toml")
 
-        self.start_rustproxy("tests/conf/timeout1.toml", "basic_test")
         verify_redis_connection(1531)
 
     def test_single_backend_failed_timeout(self):
-        kill_redis_server(6380)
-        kill_redis_server(6381)
-
         self.start_redis_server(6381)
-
         self.start_delayer(6380, 6381, 101)
-
-        self.start_rustproxy("tests/conf/timeout1.toml", "basic_test")
+        self.start_rustproxy("tests/conf/timeout1.toml")
 
         verify_redis_error(1531, "RustProxy timed out")
+
+    def test_single_backend_ejected(self):
+        # Test that when a backend becomes unresponsive, it will be ejected
+        # For single backend pools, all subsequent requests will immediately return failure.
+        # When the single backend recovers, requests should be successful.
+        self.start_redis_server(6381)
+        self.start_delayer(6380, 6381, 2, 6382)
+        self.start_rustproxy("tests/conf/retrylimit1.toml")
+
+        verify_redis_connection(1531)
+
+        conn_to_delayer = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        conn_to_delayer.connect(("127.0.0.1", 6382))
+        conn_to_delayer.sendall("SETDELAY 201")
+
+        verify_redis_error(1531, "RustProxy timed out")
+        verify_redis_error(1531, "RustProxy timed out")
+        verify_redis_error(1531, "RustProxy timed out")
+        verify_redis_error(1531, "Unavailable backend")
+        verify_redis_error(1531, "Unavailable backend")
+
+        time.sleep(5)
+
+        verify_redis_connection(1531)
+        verify_redis_connection(1531)
+        verify_redis_connection(1531)
+
 # unsuccessful, no backends, no timeout.
 
 # test a backend responding with just a partial response and then failing to ever respond.
@@ -214,37 +221,31 @@ class TestRustProxy(unittest.TestCase):
 
 # Test successful, multiple (4) backends, no timeout. verify that the sharding is correct.
     def test_multiple_backend_no_timeout(self):
-        kill_redis_server(6381)
-        kill_redis_server(6382)
-        kill_redis_server(6383)
-        kill_redis_server(6384)
-
         self.start_redis_server(6381)
         self.start_redis_server(6382)
         self.start_redis_server(6383)
         self.start_redis_server(6384)
-
-        self.start_rustproxy("tests/conf/multishard1.toml", "basic_test")
+        self.start_rustproxy("tests/conf/multishard1.toml")
 
         verify_redis_connection(1533)
 
-        # TEMP: Account for finalized default hash algorithm
-        populate_redis_key(1533, "key1")
-        print(expect_redis_key(6384, "key1"))
-        print(expect_redis_key(6383, "key1"))
-        print(expect_redis_key(6382, "key1"))
-        print(expect_redis_key(6381, "key1"))
-
-        populate_redis_key(6384, "key1")
+        populate_redis_key(6381, "key1")
         self.assertTrue(expect_redis_key(1533, "key1"))
-        #populate_redis_key(6382, "key2")
-        #self.assertTrue(expect_redis_key(1533, "key2"))
         populate_redis_key(6384, "key2")
         self.assertTrue(expect_redis_key(1533, "key2"))
 
-    def test_multiple_bacvend_with_timeout(self):
-        pass
+    def test_multiple_backend_with_timeout(self):
+        self.start_redis_server(6381)
+        self.start_redis_server(6382)
+        self.start_redis_server(6383)
+        self.start_redis_server(6380)
+        self.start_delayer(6384, 6380, 101)
+        self.start_rustproxy("tests/conf/multishard2.toml")
 
+        verify_redis_connection(1533)
+
+        populate_redis_key(6384, "key1")
+        verify_redis_error(1533, "RustProxy timed out")
 
 # Test cluster backends, no timeout. Verify sharding is correct.
     def test_cluster_no_timeout(self):
@@ -254,16 +255,14 @@ class TestRustProxy(unittest.TestCase):
         # start up redis servers
         # start up rustproxy
         # check sharding.
-        kill_redis_server(7000)
-        kill_redis_server(7001)
-        kill_redis_server(7002)
         self.start_redis_cluster_server(7000)
         self.start_redis_cluster_server(7001)
         self.start_redis_cluster_server(7002)
         self.initialize_redis_cluster([7000, 7001, 7002])
+        self.start_rustproxy("tests/conf/cluster1.toml")
 
-        self.start_rustproxy("tests/conf/cluster1.toml", "basic_test")
         verify_redis_connection(1533)
+
         populate_redis_key(1533, "key1")
         self.assertTrue(expect_redis_key(1533, "key1"))
 
@@ -271,28 +270,26 @@ class TestRustProxy(unittest.TestCase):
         self.assertTrue(expect_redis_key(1533, "key2"))
 
     def test_retry_connection(self):
-        kill_redis_server(6380)
-        self.start_rustproxy("tests/conf/timeout1.toml", "basic_test")
+        self.start_rustproxy("tests/conf/timeout1.toml")
+
         verify_redis_error(1531, "Error connecting to backend")
+
         self.start_redis_server(6380)
         time.sleep(0.5)
+
         verify_redis_connection(1531)
 
     def test_admin(self):
-        self.start_rustproxy("tests/conf/timeout1.toml", "basic_test")
+        self.start_rustproxy("tests/conf/timeout1.toml")
 
         r = redis.Redis(port=1530, decode_responses=True)
         response = r.execute_command("INFO")
         self.assertEqual(response.get('__raw__'), ["DERP"]);
 
-
     def test_switch_config(self):
-        kill_redis_server(6380)
         self.start_redis_server(6380)
-        kill_redis_server(6381)
         self.start_redis_server(6381)
-
-        self.start_rustproxy("tests/conf/timeout1.toml", "basic_test")
+        self.start_rustproxy("tests/conf/timeout1.toml")
 
         r = redis.Redis(port=1530)
         response = r.execute_command("LOADCONFIG tests/conf/timeout1.toml")

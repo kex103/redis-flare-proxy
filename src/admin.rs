@@ -169,7 +169,6 @@ pub fn handle_client_socket(rustproxy: &mut RustProxy, token: ClientToken) {
             response.push_str("+");
             response.push_str(res.as_str());
             response.push_str("\r\n");
-            //response = "$-1\r\n".to_owned();
             debug!("RESPONSE: {}", &response);
             rustproxy.admin.write_to_client(token, response, &mut rustproxy.written_sockets);
             //let client_stream = rustproxy.admin.client_sockets.get_mut(&token).unwrap();
