@@ -141,11 +141,9 @@ class TestRustProxy(unittest.TestCase):
         time.sleep(1.0);
 
     def start_rustproxy(self, config_path):
-        log_file = "tests/log/{}.log".format(self.id())
-        log_out = open("tests/log/{}.log.stdout".format(self._testMethodName), 'w')
+        log_out = open("tests/log/{}.stdout".format(self._testMethodName), 'w')
         args = ["-c{}".format(
             config_path),
-            #"-o{}".format(log_file),
             "-l DEBUG"]
         env = os.environ.copy()
         env['RUST_BACKTRACE'] = '1'
@@ -156,8 +154,12 @@ class TestRustProxy(unittest.TestCase):
         self.proxy_admin_ports.append(1530)
 
     def start_delayer(self, incoming_port, outgoing_port, delay, admin_port=None):
+        log_out = open("tests/log/{}.delayer.stdout".format(self._testMethodName), 'w')
         FNULL = open(os.devnull, 'w')
-        process = subprocess.Popen(["python", "tests/delayed_responder.py", str(incoming_port), str(outgoing_port), str(delay), str(admin_port)], stdout=FNULL)
+        process = subprocess.Popen(
+            ["python", "tests/delayed_responder.py", str(incoming_port), str(outgoing_port), str(delay), str(admin_port)],
+            stdout=log_out
+        )
         self.subprocesses.append(process)
 
 
@@ -169,7 +171,7 @@ class TestRustProxy(unittest.TestCase):
 
     def test_single_backend_with_timeout(self):
         self.start_redis_server(6381)
-        self.start_delayer(6380, 6381, 99)
+        self.start_delayer(6380, 6381, 50)
         self.start_rustproxy("tests/conf/timeout1.toml")
 
         verify_redis_connection(1531)
@@ -182,27 +184,30 @@ class TestRustProxy(unittest.TestCase):
         verify_redis_error(1531, "RustProxy timed out")
 
     def test_single_backend_ejected(self):
-        # Test that when a backend becomes unresponsive, it will be ejected
-        # For single backend pools, all subsequent requests will immediately return failure.
-        # When the single backend recovers, requests should be successful.
         self.start_redis_server(6381)
         self.start_delayer(6380, 6381, 2, 6382)
         self.start_rustproxy("tests/conf/retrylimit1.toml")
 
         verify_redis_connection(1531)
 
+        # Set a long delay, so that all requests to the backend will time out.
         conn_to_delayer = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-        conn_to_delayer.connect(("127.0.0.1", 6382))
-        conn_to_delayer.sendall("SETDELAY 201")
-
+        conn_to_delayer.connect(("0.0.0.0", 6382))
+        conn_to_delayer.sendall("SETDELAY 401")
+        # Verify that requests time out. After the 3rd failure, the backend is blacklisted.
         verify_redis_error(1531, "RustProxy timed out")
         verify_redis_error(1531, "RustProxy timed out")
         verify_redis_error(1531, "RustProxy timed out")
-        verify_redis_error(1531, "Unavailable backend")
-        verify_redis_error(1531, "Unavailable backend")
+        verify_redis_error(1531, "ERROR: Not connected")
+        verify_redis_error(1531, "ERROR: Not connected")
+        time.sleep(1)
+        # TODO: Have delayer stop listening to all server sockets for a bit.
 
-        time.sleep(5)
-
+        # Set a short delay, so requests will stop timing out.
+        conn_to_delayer.sendall("SETDELAY 2")
+        # Wait a second, to give time for the proxy to detect that the backend is available again.
+        time.sleep(1)
+        # Verify that requests succeed now.
         verify_redis_connection(1531)
         verify_redis_connection(1531)
         verify_redis_connection(1531)
@@ -272,7 +277,7 @@ class TestRustProxy(unittest.TestCase):
     def test_retry_connection(self):
         self.start_rustproxy("tests/conf/timeout1.toml")
 
-        verify_redis_error(1531, "Error connecting to backend")
+        verify_redis_error(1531, "ERROR: Not connected")
 
         self.start_redis_server(6380)
         time.sleep(0.5)

@@ -5,11 +5,17 @@ import socket
 import time
 import signal
 import sys
+import traceback
 
+start = time.time()
+print(start)
 # Can only handle 1.
 
 def signal_term_handler(signal, frame):
     print("SHUTTING DOWN!")
+    print("Signal: {} Frame: {}".format(signal, frame))
+    delta = time.time() - start
+    print delta
     try:
         server_socket.shutdown(socket.SHUT_RDWR)
     except:
@@ -33,14 +39,14 @@ output_stream.connect((hostname, port2))
 server_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
 server_socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
 server_socket.bind((hostname, port1))
-server_socket.listen(1)
+server_socket.listen(5)
 
 admin_socket = None
 if admin_port:
     admin_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     admin_socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
     admin_socket.bind((hostname, admin_port))
-    admin_socket.listen(1)
+    admin_socket.listen(5)
 
 clients = []
 input_stream = None
@@ -51,7 +57,9 @@ try:
     while 1:
 
         sockets = [output_stream, server_socket] + clients
-        readable, _, _ = select.select(sockets, [], [])
+        if admin_socket:
+            sockets = sockets + [admin_socket]
+        readable, _, errorable = select.select(sockets, [], sockets)
         for read in readable:
             if read == output_stream:
                 data = output_stream.recv(1024)
@@ -59,22 +67,43 @@ try:
                 time.sleep(delay)
                 delta = time.time() - now
                 print("Microtime: {}".format(delta * 1000))
-                input_stream.send(data)
+                if input_stream:
+                    input_stream.send(data)
             elif read == input_stream:
                 data = input_stream.recv(1024)
                 output_stream.send(data)
+                if data:
+                    print("Sending data to backend: {}".format(data))
+                else:
+                    print("Terminating early")
+                    delta = time.time() - start
+                    print(delta)
+                    input_stream.close()
+                    clients.remove(input_stream)
+                    input_stream = None
             elif read == server_socket:
                 input_stream, _ = server_socket.accept()
                 clients.append(input_stream)
+                print("Got a new client!")
+                server_socket.listen(5)
             elif read == admin_socket:
-                admin_stream, _ = server_socket.accept()
+                admin_stream, _ = admin_socket.accept()
                 clients.append(admin_stream)
             elif read == admin_stream:
-                data = input_stream.recv(1024)
+                data = admin_stream.recv(1024)
+                print("Got an admin message: {}".format(data))
                 words = data.split()
-                if words[0] == "SETDELAY":
+                if len(words) > 0 and words[0] == "SETDELAY":
                     delay = float(words[1]) / 1000
                     print("Delay is now {}".format(delay))
-
+        for error in errorable:
+            print("Error!")
+            print("{}".format(error.errno()))
+except Exception as e:
+    print("Socket error!")
+    traceback.print_exc(file=sys.stdout)
+    raise e
 except:
+    e = sys.exc_info()[0]
+    print(e)
     signal_term_handler(None, None)
