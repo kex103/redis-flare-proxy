@@ -15,7 +15,6 @@ use std::cell::RefCell;
 use std::rc::Rc;
 use cluster_backend::{ClusterBackend};
 
-
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum BackendStatus {
     CONNECTED,
@@ -151,11 +150,10 @@ impl Backend {
         }
     }
 
-    pub fn handle_backend_failure(&mut self, token: Token,
-    ) {
+    pub fn handle_backend_failure(&mut self, token: Token) {
         match self.single {
             BackendEnum::Single(ref mut backend) => backend.handle_backend_failure(),
-            BackendEnum::Cluster(ref mut backend) => backend.handle_backend_failure(token, ),
+            BackendEnum::Cluster(ref mut backend) => backend.handle_backend_failure(token),
         }
     }
 }
@@ -225,15 +223,12 @@ impl SingleBackend {
             debug!("Trying to connect when already connected!");
             return;
         }
-        // TOODO: Try to get rid of old stuff if reconnecting.
-        if self.socket.is_some() {
-            //poll.deregister(&self.socket.unwrap());
-        }
 
         let addr = self.host.parse().unwrap();
 
         // Setup the server socket
         let socket = TcpStream::connect(&addr).unwrap();
+        debug!("New socket to {}: {:?}", addr, socket);
 
         self.change_state(BackendStatus::CONNECTING);
 
@@ -245,6 +240,12 @@ impl SingleBackend {
 
     // Callback after initializing a connection.
     fn handle_connection(&mut self) {
+        /*
+            Are there any situations where self.timer is used for a request timeout, and not a retry timeout here?
+        */
+        self.timer = None;
+
+
         // if auth, connect with password?
         if self.config.auth != String::new() {
             self.write_to_stream(NULL_TOKEN, "AUTH pass".to_owned());
@@ -269,7 +270,7 @@ impl SingleBackend {
         &mut self,
         timestamp: Instant
     ) -> bool {
-        debug!("Handling timeout: {:?}", self.token);
+        debug!("Handling timeout: Timeout {:?}", self.token);
         if self.status == BackendStatus::DISCONNECTED {
             return false;
         }
@@ -280,6 +281,10 @@ impl SingleBackend {
             let head = self.queue.get(0).unwrap();
             head.clone()
         };
+
+        // Get rid of first queue.
+        self.queue.pop_front();
+
         let ref time = head.1;
         if &timestamp < time {
             return false;
@@ -290,7 +295,7 @@ impl SingleBackend {
         if &timestamp == time {
             if self.failure_limit > 0 {
                 self.failure_count += 1;
-                if self.failure_count > self.failure_limit {
+                if self.failure_count >= self.failure_limit {
                     return true;
                 }
             }
@@ -302,13 +307,19 @@ impl SingleBackend {
     }
 
     // Marks the backend as down. Returns an error message to all pending requests.
+    // TODO: Is it still needed to have a mark_backend_down AND handle_backend_failure?
     pub fn mark_backend_down(&mut self) {
         if self.status == BackendStatus::CONNECTED {
             self.subscribers_registry.borrow_mut().remove(&Token(self.token.0 - 1));
-            // Point of cleaning this up is so that we don't try to reconnect too soon after we successfully connect
-            // and fail.
+        }
+        if self.socket.is_some() {
+            let err = self.socket.as_mut().unwrap().get_mut().take_error();
+            debug!("Previous socket error: {:?}", err);
         }
         self.change_state(BackendStatus::DISCONNECTED);
+
+        self.failure_count = 0;
+
         let mut possible_token = self.queue.pop_front();
         loop {
             match possible_token {
@@ -320,8 +331,10 @@ impl SingleBackend {
             }
             possible_token = self.queue.pop_front();
         }
-        self.socket = None;
+        
         self.subscribers_registry.borrow_mut().remove(&self.token);
+
+        self.socket = None;
     }
 
     pub fn flush_stream(&mut self) {
@@ -329,7 +342,9 @@ impl SingleBackend {
             Some(ref mut socket) => {
                 let _ = socket.flush();
             }
-            None => panic!("none found")
+            None => {
+                debug!("Backend {:?} stream not found when flushing. Did it just get DISCONNECTED?", self.token);
+            }
         }
     }
 
@@ -372,9 +387,7 @@ impl SingleBackend {
         self.retry_connect();
     }
 
-    fn retry_connect(
-        &mut self,
-    ) {
+    fn retry_connect(&mut self) {
         debug!("Creating timer");
         // Create new timer.
         let mut timer = Timer::default();
@@ -466,7 +479,7 @@ impl SingleBackend {
         let now = Instant::now();
         let timestamp = now + Duration::from_millis(self.timeout as u64);
         self.queue.push_back((client_token, timestamp));
-        if self.queue.len() == 1 {
+        if self.queue.len() == 1 && self.timeout != 0 {
             let mut timer = Timer::default();
             let _ = timer.set_timeout(Duration::from_millis(self.timeout as u64), ());
             let timer_token = self.get_timeout_token();

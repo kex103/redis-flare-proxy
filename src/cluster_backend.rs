@@ -339,6 +339,7 @@ impl ClusterBackend {
         if client_token == NULL_TOKEN {
             {
             let mut register_backend = |host:String, start: usize, end: usize| {
+                debug!("Backend slots map registered! {} From {} to {}", host, start, end);
                 for i in start..end+1 {
                     self.slots.remove(i);
                     self.slots.insert(i, host.clone());
@@ -373,9 +374,7 @@ impl ClusterBackend {
         }
     }
 
-    pub fn handle_backend_failure(&mut self,
-        token: BackendToken,
-    ) {
+    pub fn handle_backend_failure(&mut self, token: BackendToken) {
         self.hosts.get_mut(&token).unwrap().handle_backend_failure();
     }
 
@@ -424,7 +423,16 @@ impl ClusterBackend {
         timestamp: Instant
     ) -> bool {
         self.hosts.get_mut(&backend_token).unwrap().handle_timeout(timestamp);
+        if self.queue.len() == 0 {
+            return false;
+        }
         let timeout = self.queue.pop_front().unwrap();
+        if timestamp < timeout.1 {
+            return false;
+        }
+        if timestamp > timeout.1 {
+            panic!("CusterBackend: handle_timeout: Timestamp greater than next queue timeout");
+        }
         match timeout.0 {
             NULL_TOKEN => {
                 // try issueing another slot command.
@@ -446,7 +454,7 @@ impl ClusterBackend {
         let hash_no = State::<XMODEM>::calculate(key.as_bytes());
         let shard_no = hash_no % 16384;
         let hostname = self.slots.get(shard_no as usize).unwrap();
-        debug!("KEX: Sharded to {}, which is {}. {:?}", shard_no, hostname, self.hostnames.keys());
+        debug!("KEX: Sharded to {}, which is {}. {:?}", shard_no as usize, hostname, self.hostnames.keys());
         return self.hostnames.get(hostname).unwrap().clone();
     }
 

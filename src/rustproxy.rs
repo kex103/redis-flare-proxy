@@ -248,6 +248,7 @@ impl RustProxy {
 
     fn handle_event(&mut self, event: &Event) {
         let token = event.token();
+        debug!("Event: {:?}", token);
         if event.readiness().contains(UnixReady::error()) {
             // TODO: Don't want to do mark backend down for client connections.
             /* Why does the errror occur? How does a backend socket just error? Timeout? Is this on establishing connection?*/
@@ -393,7 +394,7 @@ impl RustProxy {
 
     fn get_socket_index(&mut self) -> usize {
         self.next_socket_index.set(self.next_socket_index.get() + SOCKET_INDEX_SHIFT);
-        info!("Getting a new token: {:?}", self.next_socket_index.get());
+        info!("Generated new token: {:?}", self.next_socket_index.get());
         self.next_socket_index.get()
     }
 

@@ -202,7 +202,7 @@ impl BackendPool {
         &mut self,
         token: Token,
     ) {
-        self.get_backend(token).mark_backend_down();
+        self.get_backend(token).handle_backend_failure(token);
         if self.config.auto_eject_hosts {
             self.rebuild_pool_sharding();
         }
@@ -317,7 +317,7 @@ impl BackendPool {
         backend_token: Token
     ) {
         self.get_backend(backend_token).connect();
-        info!("Attempted to reconnect: {:?}", &backend_token);
+        info!("Attempted to reconnect: Backend {:?}", &backend_token);
     }
 
     fn write_to_client(&mut self, client_token: Token, message: String, written_sockets: &mut VecDeque<(Token, StreamType)>,) {
