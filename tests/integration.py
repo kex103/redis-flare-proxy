@@ -200,6 +200,7 @@ class TestRustProxy(unittest.TestCase):
         verify_redis_error(1531, "RustProxy timed out")
         verify_redis_error(1531, "ERROR: Not connected")
         verify_redis_error(1531, "ERROR: Not connected")
+        conn_to_delayer.sendall("BLOCK_NEW_CONNS 750")
         time.sleep(1)
         # TODO: Have delayer stop listening to all server sockets for a bit.
 
