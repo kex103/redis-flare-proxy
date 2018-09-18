@@ -53,7 +53,7 @@ def expect_redis_key(port, key="test_key", data="value"):
     except redis.exceptions.ConnectionError, e:
         raise AssertionError("Failed to connect to port: {}".format(port))
 
-def verify_redis_error(port, message):
+def verify_redis_error(port, message=None, expect_conn_error=False):
     try:
         r = redis.Redis(port=port, socket_timeout=1)
         r.get("hi")
@@ -61,6 +61,9 @@ def verify_redis_error(port, message):
     except redis.exceptions.ResponseError, e:
         if str(e) != message:
             raise AssertionError("Expected '{}', received '{}' instead".format(message, str(e)))
+    except redis.ConnectionError, e:
+        if not expect_conn_error:
+            raise e
 
 class TestRustProxy(unittest.TestCase):
     subprocesses = []
@@ -213,7 +216,14 @@ class TestRustProxy(unittest.TestCase):
         verify_redis_connection(1531)
         verify_redis_connection(1531)
 
-# unsuccessful, no backends, no timeout.
+    def test_no_backend_failure(self):
+        # Spawn a proxy with no backend. Verify that it complains about invalid config.
+        self.start_rustproxy("tests/conf/nobackends.toml")
+        verify_redis_error(1533, expect_conn_error=True)
+
+        # Then spawn a proxy pointing to an invalid backend. Verify the redis error should be "Not connected"
+        self.start_rustproxy("tests/conf/timeout1.toml")
+        verify_redis_error(1531, "ERROR: Not connected")
 
 # test a backend responding with just a partial response and then failing to ever respond.
     def test_partial_response_timeout(self):
