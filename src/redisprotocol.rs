@@ -22,14 +22,11 @@ impl Error for RedisProtocolError {
     }
 }
 
-pub fn determine_shard(command: String, count: usize) -> Result<usize, RedisProtocolError> {
-    match extract_key(command) {
-        Ok(key) => Ok(hash(key) & count),
-        Err(error) => Err(error),
-    }
+pub fn determine_modula_shard(key: &String, count: usize) -> Result<usize, RedisProtocolError> {
+    Ok(hash(key) % count)
 }
 
-pub fn extract_key(command: String) -> Result<String, RedisProtocolError> {
+pub fn extract_key(command: &String) -> Result<String, RedisProtocolError> {
     let mut iter = command.split_whitespace();
     iter.next();
     iter.next();
@@ -81,7 +78,7 @@ pub fn extract_key(command: String) -> Result<String, RedisProtocolError> {
     }
 }
 
-pub fn hash(key: String) -> usize {
+pub fn hash(key: &String) -> usize {
     //debug!("Hashing: {}", key);
     //let mut hasher = DefaultHasher::new();
     //key.hash(&mut hasher);
@@ -107,7 +104,7 @@ fn test_hashing_speed() {
     // Using this test function to test how fast hashing can be.
     let start = Instant::now();
     for _ in 1..2000000 {
-        hash(a.clone());
+        hash(&a);
     }
     info!("Time spent with default: {:?}", Instant::now() - start);
     let start = Instant::now();

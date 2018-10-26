@@ -35,3 +35,62 @@
 
 // Poll 1 had zero requests queued up. its first request, it comes in, it'll then add in an element to the cached queue.
 // Cached queue expires. checks if it's still relevant.
+
+
+ALPHA FEATURE LIST:
+- 1 *Shards traffic based on key
+- Supports ketama
+- Supports modula
+- Supports random
+- 2 Can set timeout for a backend
+- *Can blackout a backend
+- *Will reconnect on a blacked out backend that is recovered
+- 3 Allows seamless hot config swapping
+- 4 Can be queried for its runtime info/configuration
+- 5 Verify redis list of commands
+- 6 Implement multiple hash algorithms (fnv1a_32, fnv1a_64, md5, crc32)
+- Supports redis authentication
+- Supports default redis db.
+- Supports auto_eject_hosts
+- 7 Supports redis cluster
+
+
+TESTS:
+1. Sharding test
+- Test that consistent hashing works with auto_eject_host being enabled.
+- Test that modula works with auto_eject_host
+- Test that random works with auto_eject_host (how? inject a set seed)
+
+2. Set timeout for a backend
+- Verify that one backend will get blacked out from a cluster if it times out. Verify that it gets re-added when it recovers.
+- Verify that multiple backends get blakced out, Verify they get re-added.
+- Test that the timeout set is fairly precise. Set it to be a bit below the threshold. Verify traffic is fine. Set it a bit above, and verify that traffic is down.
+- Test that the retry timeouts are fairly accurate? Verify that trafffic is blacked out right before the timeout. Verify that it is fine right after.
+
+3. Hotconfig swapping
+- Verify that loading a new config takes a low amount of time, and ideally it shouldn't affect request performance (make it a separate thread?) Verify that the config info has changed to the new one.
+- Verify loading, then canceling. Verify info is of the current config, and that traffic has not changed.
+- Verify changing config so to modify the timeout of a cluster. Sending traffic while the config is happening. Verify nothing gets dropped. Verify the new timeout is valid now.
+- Test loading an invalid config. It should be rejected.
+- Test loading a nonexistent config. It should be rejected.
+- Test changing config to modify the cluster backends. Such as from redis1/redis2 to redis3/redis4 Send traffic while the switch is happening. Verify nothing gets dropped. The ordering of requests should be correct.
+- Test changing the config to add and remove pools. Verify that requests to a removed pool returns with the correct error. Verify new pools work as expected.
+- Test changing the config to modify the admin port. Verify that the existing connection terminates, and the new one is connectable.
+- Test changing the config when a new port is already in use. If it fails to load those ports, it will abort early, and relinquish those ports.
+
+4. Runtime info
+- Verify Return current status of current configs, as well as any loaded configs.
+- Verify Returns the version of the proxy
+
+
+5. Redis list of commands
+- Test doing all of the redis commands, and that they get routed properly. Verify bad commands do not occur.
+
+6. Hash algorithms.
+- Test fnv1a_3, fnv1a_64, md5, crc32
+
+7. Redis cluster.
+- Test on a valid redis cluster.
+- Test when one of the cluster instances fail.
+- Test when the backend isn't actually a cluster.
+- Test when reconfigured.

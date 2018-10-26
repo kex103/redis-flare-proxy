@@ -1,0 +1,15 @@
+[admin]
+listen = "127.0.0.1:1530"
+
+[pools]
+  [pools.pool1]
+    listen = "127.0.0.1:1531"
+    servers = [
+      { host = "127.0.0.1:6381", weight = 1},
+      { host = "127.0.0.1:6382", weight = 1},
+      { host = "127.0.0.1:6383", weight = 1},
+      { host = "127.0.0.1:6384", weight = 1},
+    ]
+    auto_eject_hosts = true
+    failure_limit = 1
+    timeout = 50

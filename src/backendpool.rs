@@ -4,7 +4,7 @@ use rustproxy::{StreamType, Subscriber};
 use rustproxy::{generate_backend_token, generate_client_token};
 use config::{Distribution, BackendPoolConfig};
 use backend::{Backend};
-use redisprotocol::determine_shard;
+use redisprotocol::{determine_modula_shard, extract_key};
 
 use mio::*;
 use mio::tcp::{TcpListener, TcpStream};
@@ -127,12 +127,24 @@ impl BackendPool {
         return self.backend_map.get_mut(backend_token).unwrap();
     }
 
+    // Based on the given command, determine which Backend to use, if any.
+    // We support Ketama, Modula, and Random.
     pub fn shard(&mut self, command: &String) -> Option<&mut Backend> {
-        let tag = get_tag(command.clone(), &self.config.hash_tag);
+        let key = extract_key(command).unwrap();
+        let tag = get_tag(key, &self.config.hash_tag);
+
+        // TODO: Also, we want to cache the shardmap building if possible.
+
+        // How does the ConsistentHashing library work?
         if self.config.distribution == Distribution::Ketama {
             let mut consistent_hash = conhash::ConsistentHash::new();
             for i in self.backends.iter() {
-                consistent_hash.add(&TokenNode {token: i.clone()}, 40);
+                let backend = self.backend_map.get_mut(i).unwrap();
+                // 40 is pulled to match twemproxy's ketama.
+                consistent_hash.add(&TokenNode {token: i.clone()}, backend.weight * 40);
+                //consistent_hash.add(&TokenNode {token: i.clone()}, backend.weight);
+                // TODO: Determine # of replicas. Most likely it's just the weight.
+                // TODO: Check if there's any discrepancy between this key and twemproxy.
             }
             let hashed_token = consistent_hash.get(tag.as_bytes()).unwrap().token;
             return self.backend_map.get_mut(&hashed_token);
@@ -148,7 +160,7 @@ impl BackendPool {
         }
 
         let shard = match self.config.distribution {
-            Distribution::Modula => determine_shard(tag, total_weight),
+            Distribution::Modula => determine_modula_shard(&tag, total_weight), // Should be using key, not command.
             Distribution::Random => Ok(thread_rng().gen_range(0, total_weight - 1)),
             _ => panic!("Impossible to hit this with ketama!"),
         };
@@ -157,22 +169,19 @@ impl BackendPool {
             Ok(shard_no) => {
                 debug!("Sharding command tag to be {}", shard_no);
                 {
-                let ref backends = self.backends;
-                let ref mut backend_map = self.backend_map;
-                for backend_token in backends.iter() {
-                    {
-                    let backendbogus = backend_map.get_mut(backend_token).unwrap();
-                    if self.config.auto_eject_hosts && !backendbogus.is_available() {
-                        continue;
+                    let ref backends = self.backends;
+                    let ref mut backend_map = self.backend_map;
+                    for backend_token in backends.iter() {
+                        let backendbogus = backend_map.get_mut(backend_token).unwrap();
+                        if self.config.auto_eject_hosts && !backendbogus.is_available() {
+                            continue;
+                        }
+                        if shard_no >= total_weight - 1 {
+                            answer = Some(backend_token.clone());
+                            break;
+                        }
+                        total_weight -= backendbogus.weight;
                     }
-                    if shard_no >= total_weight - 1 {
-                        answer = Some(backend_token.clone());
-                        break;
-                    }
-                    total_weight -= backendbogus.weight;
-                    }
-                    
-                }
                 }
                 match answer {
                     Some(backend_token) => return self.backend_map.get_mut(&backend_token),
@@ -187,9 +196,9 @@ impl BackendPool {
     pub fn handle_timeout(
         &mut self,
         backend_token: Token,
-        timestamp: Instant
+        target_timestamp: Instant
     ) {
-        if self.get_backend(backend_token).handle_timeout(backend_token, timestamp) {
+        if self.get_backend(backend_token).handle_timeout(backend_token, target_timestamp) {
             self.mark_backend_down(backend_token);
         }
     }
@@ -261,23 +270,25 @@ impl BackendPool {
         client_token: Token
     ) {
         debug!("Handling client: {:?}", &client_token);
-        let string = {
-            let mut string = String::new();
+
+        // 1. Pull command from client.
+        let client_request = {
+            let mut buf = String::new();
             match self.client_sockets.get_mut(&client_token) {
                 Some(stream) => {
-                    let result = stream.read_to_string(&mut string);
-                    debug!("Read from client: {} ({})", string, string.len());
+                    let result = stream.read_to_string(&mut buf);
+                    debug!("Read from client: {} ({})", buf, buf.len());
                     match result {
                         Ok(size) => {
                             debug!("Length: {}", size);
                             if size == 0 {
-                                let _ = stream.read_to_string(&mut string);
-                                debug!("Read again: {}", string);
+                                let _ = stream.read_to_string(&mut buf);
+                                debug!("Read again: {}", buf);
                             }
                         }
                         Err(reason) => {
-                            if string.len() == 0 {
-                                error!("Error: {}, {}", reason, string);
+                            if buf.len() == 0 {
+                                error!("Error: {}, {}", reason, buf);
                             }
                         }
                     }
@@ -286,9 +297,10 @@ impl BackendPool {
                     error!("Handle client called for expired socket!");
                 }
             }
-            string
+            buf
         };
-        if string.len() == 0 {
+        // 1b. Handle client closing if it was just an empty message.
+        if client_request.len() == 0 {
             self.client_sockets.remove(&client_token);
             // TODO: Clean up references to client token in rustproxy?
             info!("Closing client socket");
@@ -300,13 +312,13 @@ impl BackendPool {
         // A cluster needs... access to all possible connections.. ?
         // Or it has its own.
         let success = {
-            let backend = self.shard(&string).unwrap();
-            backend.write_message(string, client_token)
+            let backend = self.shard(&client_request).unwrap();
+            backend.write_message(client_request, client_token)
         };
 
         if !success {
-            let string = "-ERROR: Not connected\r\n".to_owned();
-            self.write_to_client(client_token, string.to_owned(), written_sockets);
+            let err_resp = "-ERROR: Not connected\r\n".to_owned();
+            self.write_to_client(client_token, err_resp.to_owned(), written_sockets);
         }
         debug!("All done handling client!");
     }
@@ -332,23 +344,41 @@ impl BackendPool {
     }
 }
 
+#[cfg(test)]
+use cluster_backend::init_logging;
+#[test]
+fn test_hashtag() {
+    init_logging();
+    assert_eq!(get_tag("/derr/der".to_string(), &"/".to_string()), "derr".to_string());
+    assert_eq!(get_tag("derr/der".to_string(), &"/".to_string()), "derr/der".to_string());
+    assert_eq!(get_tag("derr<der>".to_string(), &"<>".to_string()), "der".to_string());
+    assert_eq!(get_tag("der/r/der".to_string(), &"//".to_string()), "r".to_string());
+    assert_eq!(get_tag("dberadearb".to_string(), &"ab".to_string()), "dear".to_string());
+}
+
 fn get_tag(command: String, tags: &String) -> String {
     if tags.len() == 0 {
         return command;
     }
-    let a = tags.chars().next().unwrap();
-    let b = tags.chars().next().unwrap();
+    let ref mut chars = tags.chars();
+    let a = chars.next().unwrap();
+    let b = match chars.next() {
+        Some(b) => b,
+        None => a
+    };
     let mut parsing_tag = false;
     let mut output = String::new();
     for cha in command.chars() {
         if !parsing_tag && cha == a {
             parsing_tag = true;
+            continue;
         }
         if parsing_tag && cha == b {
             return output;
         }
         if parsing_tag {
             output.push(cha);
+            continue;
         }
     }
     return command;

@@ -46,17 +46,20 @@ def populate_redis_key(port, key="test_key", data="value"):
         raise AssertionError("Failed to connect to port: {}".format(port))
 
 def expect_redis_key(port, key="test_key", data="value"):
+    # if data is None, any value is fine, so long as the key exists in the given port.
     try:
         r = redis.Redis(port=port, socket_timeout=1)
         return_value = r.get(key)
-        return return_value == data
+        if return_value == None:
+            return False
+        return data==None or return_value == data
     except redis.exceptions.ConnectionError, e:
         raise AssertionError("Failed to connect to port: {}".format(port))
 
-def verify_redis_error(port, message=None, expect_conn_error=False):
+def verify_redis_error(port, message=None, expect_conn_error=False, key="hi"):
     try:
         r = redis.Redis(port=port, socket_timeout=1)
-        r.get("hi")
+        r.get(key)
         raise AssertionError("Expected error '{}' did not occur.".format(message))
     except redis.exceptions.ResponseError, e:
         if str(e) != message:
@@ -64,6 +67,25 @@ def verify_redis_error(port, message=None, expect_conn_error=False):
     except redis.ConnectionError, e:
         if not expect_conn_error:
             raise e
+
+def flush_keys(redis_ports):
+    for redis_port in redis_ports:
+        r = redis.Redis(port=redis_port, socket_timeout=1)
+        r.flushall()
+
+# Function to help determine shardng to write tests.
+def determine_backend(key, ports):
+    already_found = False
+    for port in ports:
+        if expect_redis_key(port, key, data=None):
+            if already_found:
+                print("ERR: DUPLICATE KEY: {} FOUND AT PORT: {}\n".format(key, port))
+            else:
+                print("KEY: {} FOUND AT PORT: {}\n".format(key, port))
+            already_found = True
+            break
+    if not already_found:
+        print("ERR: FAILED TO FIND KEY {} AT ANY PORT".format(key))
 
 class TestRustProxy(unittest.TestCase):
     subprocesses = []
@@ -157,7 +179,7 @@ class TestRustProxy(unittest.TestCase):
         self.proxy_admin_ports.append(1530)
 
     def start_delayer(self, incoming_port, outgoing_port, delay, admin_port=None):
-        log_out = open("tests/log/{}.delayer.stdout".format(self._testMethodName), 'w')
+        log_out = open("tests/log/{}.delayer{}.stdout".format(self._testMethodName, incoming_port), 'w')
         FNULL = open(os.devnull, 'w')
         process = subprocess.Popen(
             ["python", "tests/delayed_responder.py", str(incoming_port), str(outgoing_port), str(delay), str(admin_port)],
@@ -184,7 +206,7 @@ class TestRustProxy(unittest.TestCase):
         self.start_delayer(6380, 6381, 101)
         self.start_rustproxy("tests/conf/timeout1.toml")
 
-        verify_redis_error(1531, "RustProxy timed out")
+        verify_redis_error(1531, "ERROR: Not connected")
 
     def test_single_backend_ejected(self):
         self.start_redis_server(6381)
@@ -205,7 +227,6 @@ class TestRustProxy(unittest.TestCase):
         verify_redis_error(1531, "ERROR: Not connected")
         conn_to_delayer.sendall("BLOCK_NEW_CONNS 750")
         time.sleep(1)
-        # TODO: Have delayer stop listening to all server sockets for a bit.
 
         # Set a short delay, so requests will stop timing out.
         conn_to_delayer.sendall("SETDELAY 2")
@@ -227,13 +248,13 @@ class TestRustProxy(unittest.TestCase):
 
 # test a backend responding with just a partial response and then failing to ever respond.
     def test_partial_response_timeout(self):
+        # Test having a broken pipe.
+        # First, spawn a proxy, then spawn a mock redis.
+        # Have the mock redis cut off the connection partway through the redis response.
+        # Verify that the proxy correctly gives a "Broken pipe" error.
+        # Verify that subsequent requests get the same error.
+        # Verify that the proxy recovers and works normally afterwards.
         pass
-
-# Test unsuccessful, single backend that is down, no timeout.
-
-# Test successful basic, single backend, yes timeout.
-
-
 
 # Test successful, multiple (4) backends, no timeout. verify that the sharding is correct.
     def test_multiple_backend_no_timeout(self):
@@ -247,21 +268,203 @@ class TestRustProxy(unittest.TestCase):
 
         populate_redis_key(6381, "key1")
         self.assertTrue(expect_redis_key(1533, "key1"))
-        populate_redis_key(6384, "key2")
+        populate_redis_key(6382, "key2")
         self.assertTrue(expect_redis_key(1533, "key2"))
 
     def test_multiple_backend_with_timeout(self):
+        # TODO: Set delay at 1 at first, then verify timeout when delay set to 101.
         self.start_redis_server(6381)
-        self.start_redis_server(6382)
-        self.start_redis_server(6383)
         self.start_redis_server(6380)
-        self.start_delayer(6384, 6380, 101)
+        self.start_redis_server(6383)
+        self.start_redis_server(6384)
+        self.start_delayer(6382, 6380, 101)
         self.start_rustproxy("tests/conf/multishard2.toml")
 
         verify_redis_connection(1533)
 
         populate_redis_key(6384, "key1")
-        verify_redis_error(1533, "RustProxy timed out")
+        verify_redis_error(1533, "ERROR: Not connected")
+
+    def test_hashtags(self):
+        self.start_redis_server(6381)
+        self.start_redis_server(6382)
+        self.start_redis_server(6383)
+        self.start_redis_server(6384)
+        ports = [6381, 6382, 6383, 6384]
+        self.start_rustproxy("tests/conf/multishardtags1.toml")
+        verify_redis_connection(1533)
+
+        populate_redis_key(1533, "key1")
+        self.assertTrue(expect_redis_key(6381, "key1"))
+        populate_redis_key(1533, "key4")
+        self.assertTrue(expect_redis_key(6384, "key4"))
+
+        # Verify single hashtag doesn't work.
+        populate_redis_key(1533, "/key4")
+        self.assertTrue(expect_redis_key(6381, "/key4"))
+        populate_redis_key(1533, "key/4")
+        self.assertTrue(expect_redis_key(6381, "key/4"))
+        populate_redis_key(1533, "key4/")
+        self.assertTrue(expect_redis_key(6383, "key4/"))
+
+        # Verify that // corresponds to the same hash.
+        populate_redis_key(1533, "key4//")
+        self.assertTrue(expect_redis_key(6383, "key4//"))
+        populate_redis_key(1533, "key4///")
+        self.assertTrue(expect_redis_key(6383, "key4///"))
+        populate_redis_key(1533, "//key4", "teste")
+        self.assertTrue(expect_redis_key(6383, "//key4", "teste"))
+
+        # Verify that /4/ corresponds to the same hash.
+        populate_redis_key(1533, "4", "/value534")
+        self.assertTrue(expect_redis_key(6381, "4", "/value534"))
+        populate_redis_key(1533, "key/4/", "/value5")
+        self.assertTrue(expect_redis_key(6381, "key/4/", "/value5"))
+        populate_redis_key(1533, "adaerr/4/", "/value2")
+        self.assertTrue(expect_redis_key(6381, "adaerr/4/", "/value2"))
+
+        # TODO: Verify hashtag pairs.
+
+        # TODO: Verify that more than 2 chars in a hashtag is invalid.
+
+    def test_backend_ejection(self):
+        # Test that auto backend host ejection works as expected.
+        # 1. Verify that when a host fails enough times, all requests get shifted by the modula.
+        # 2. Verify that when another host fails, all requests get shifted again.
+        # 3. Verify that when that 2nd failed host recovers, requests shift back.
+        # 4. Verify requests return to original sharding when the 1st failed host recovers.
+        # TODO: Set up a test while a constant stream of redis requests occurs. We want to make sure the switch is clean.
+
+        self.start_redis_server(6381)
+        self.start_redis_server(6382)
+        self.start_redis_server(6386)
+        self.start_redis_server(6380)
+        ports = [6381, 6382, 6386, 6380]
+        self.start_delayer(incoming_port=6384, outgoing_port=6380, delay=1, admin_port=6385)
+        self.start_delayer(incoming_port=6383, outgoing_port=6386, delay=1, admin_port=6387)
+        self.start_rustproxy("tests/conf/multishardeject1.toml")
+        verify_redis_connection(1531)
+
+        populate_redis_key(1531, "key1")
+        self.assertTrue(expect_redis_key(6381, "key1"))
+        populate_redis_key(1531, "key2")
+        self.assertTrue(expect_redis_key(6382, "key2"))
+        populate_redis_key(1531, "key3")
+        self.assertTrue(expect_redis_key(6386, "key3"))
+        populate_redis_key(1531, "key4")
+        self.assertTrue(expect_redis_key(6380, "key4"))
+        populate_redis_key(1531, "key5")
+        self.assertTrue(expect_redis_key(6381, "key5"))
+        populate_redis_key(1531, "key6")
+        self.assertTrue(expect_redis_key(6382, "key6"))
+
+        flush_keys(ports)
+
+        # Set a long delay, so that all requests to the backend will time out.
+        conn_to_delayer1 = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        conn_to_delayer1.connect(("0.0.0.0", 6385))
+        conn_to_delayer1.sendall("SETDELAY 401")
+
+        # Send a request to the bad backend, to make Rustproxy realize it is down.
+        # TODO: One feature is have proxy ping health checks to backends periodically.
+        try:
+            populate_redis_key(1531, "key4")
+            self.fail("Expected to time out")
+        except:
+            pass
+        self.assertTrue(expect_redis_key(6380, "key4"))
+
+        populate_redis_key(1531, "key4")
+        self.assertTrue(expect_redis_key(6381, "key4"))
+        populate_redis_key(1531, "key1")
+        self.assertTrue(expect_redis_key(6382, "key1"))
+        populate_redis_key(1531, "key2")
+        self.assertTrue(expect_redis_key(6381, "key2"))
+        populate_redis_key(1531, "key3")
+        self.assertTrue(expect_redis_key(6386, "key3"))
+        populate_redis_key(1531, "key4")
+        self.assertTrue(expect_redis_key(6381, "key4"))
+        populate_redis_key(1531, "key5")
+        self.assertTrue(expect_redis_key(6386, "key5"))
+        populate_redis_key(1531, "key6")
+        self.assertTrue(expect_redis_key(6382, "key6"))
+
+        flush_keys(ports)
+
+        # Set a long delay, so that all requests to the backend will time out.
+        conn_to_delayer2 = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        conn_to_delayer2.connect(("0.0.0.0", 6387))
+        conn_to_delayer2.sendall("SETDELAY 401")
+        try:
+            populate_redis_key(1531, "key3")
+            self.fail("Expected to time out")
+        except:
+            pass
+        self.assertTrue(expect_redis_key(6386, "key3"))
+
+        populate_redis_key(1531, "key1")
+        self.assertTrue(expect_redis_key(6381, "key1"))
+        populate_redis_key(1531, "key2")
+        self.assertTrue(expect_redis_key(6382, "key2"))
+        populate_redis_key(1531, "key3")
+        self.assertTrue(expect_redis_key(6381, "key3"))
+        # key4 can shift because it is originally mapped to a bad instance.
+        populate_redis_key(1531, "key4")
+        self.assertTrue(expect_redis_key(6382, "key4"))
+        populate_redis_key(1531, "key5")
+        self.assertTrue(expect_redis_key(6381, "key5"))
+        populate_redis_key(1531, "key6")
+        self.assertTrue(expect_redis_key(6382, "key6"))
+
+        flush_keys(ports)
+
+        conn_to_delayer2.sendall("SETDELAY 1")
+        time.sleep(1)
+
+        populate_redis_key(1531, "key3")
+        self.assertTrue(expect_redis_key(6386, "key3"))
+        populate_redis_key(1531, "key4")
+        self.assertTrue(expect_redis_key(6381, "key4"))
+        populate_redis_key(1531, "key1")
+        self.assertTrue(expect_redis_key(6382, "key1"))
+        populate_redis_key(1531, "key2")
+        self.assertTrue(expect_redis_key(6381, "key2"))
+        populate_redis_key(1531, "key3")
+        self.assertTrue(expect_redis_key(6386, "key3"))
+        populate_redis_key(1531, "key4")
+        self.assertTrue(expect_redis_key(6381, "key4"))
+        populate_redis_key(1531, "key5")
+        self.assertTrue(expect_redis_key(6386, "key5"))
+        populate_redis_key(1531, "key6")
+        self.assertTrue(expect_redis_key(6382, "key6"))
+
+        flush_keys(ports)
+
+        conn_to_delayer1.sendall("SETDELAY 1")
+        time.sleep(1)
+
+        populate_redis_key(1531, "key1")
+        self.assertTrue(expect_redis_key(6381, "key1"))
+        populate_redis_key(1531, "key2")
+        self.assertTrue(expect_redis_key(6382, "key2"))
+        populate_redis_key(1531, "key3")
+        self.assertTrue(expect_redis_key(6386, "key3"))
+        populate_redis_key(1531, "key4")
+        self.assertTrue(expect_redis_key(6380, "key4"))
+        populate_redis_key(1531, "key5")
+        self.assertTrue(expect_redis_key(6381, "key5"))
+        populate_redis_key(1531, "key6")
+        self.assertTrue(expect_redis_key(6382, "key6"))
+
+    def test_conhashing(self):
+        pass
+        # Test that consistent hashing works as expected
+        # 1. Test that hashing is similar to twemproxy. (4 backends)
+        # 2. Verify that when one backend is ejected (with auto_eject_host), all requests to other backends remain, but requests to the failed one gets moved.
+        # 3. Verify the same happens when another backend is ejected. Verify it's the same as twemproxy.
+        # 4. Verify recover of 2nd
+        # 5. Verify recovery of first.
+        # TODO: Set up a test while a constant stream of redis requests occurs. We want to make sure the switch is clean.
 
 # Test cluster backends, no timeout. Verify sharding is correct.
     def test_cluster_no_timeout(self):

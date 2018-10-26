@@ -316,10 +316,11 @@ impl ClusterBackend {
     }
 
     pub fn handle_backend_response(&mut self, token: Token) {
+        // TODO: this should just call backend's handle_backend_response, and intercept any commands for slotsmap.
+
         // Grab response.
         // Look up queue. If it is token 0.
         // handle it.
-        debug!("KEX: Handling backend response for cluster");
         debug!("Queue: {:?}", self.queue);
         self.hosts.get_mut(&token).unwrap().change_state(BackendStatus::CONNECTED);
         self.change_state(BackendStatus::LOADING, token);
@@ -336,6 +337,8 @@ impl ClusterBackend {
             }
         };
 
+
+        // BUG: TODO: Move this to handle_connection
         if client_token == NULL_TOKEN {
             {
             let mut register_backend = |host:String, start: usize, end: usize| {
@@ -420,17 +423,17 @@ impl ClusterBackend {
     pub fn handle_timeout(
         &mut self,
         backend_token: Token,
-        timestamp: Instant
+        target_timestamp: Instant
     ) -> bool {
-        self.hosts.get_mut(&backend_token).unwrap().handle_timeout(timestamp);
+        self.hosts.get_mut(&backend_token).unwrap().handle_timeout(target_timestamp);
         if self.queue.len() == 0 {
             return false;
         }
         let timeout = self.queue.pop_front().unwrap();
-        if timestamp < timeout.1 {
+        if target_timestamp < timeout.1 {
             return false;
         }
-        if timestamp > timeout.1 {
+        if target_timestamp > timeout.1 {
             panic!("CusterBackend: handle_timeout: Timestamp greater than next queue timeout");
         }
         match timeout.0 {
@@ -450,7 +453,7 @@ impl ClusterBackend {
     }
 
     fn get_shard(&self, message: String)-> Token {
-        let key = extract_key(message).unwrap();
+        let key = extract_key(&message).unwrap();
         let hash_no = State::<XMODEM>::calculate(key.as_bytes());
         let shard_no = hash_no % 16384;
         let hostname = self.slots.get(shard_no as usize).unwrap();

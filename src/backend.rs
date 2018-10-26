@@ -3,7 +3,7 @@ use config::BackendConfig;
 use backendpool::{BackendPool, parse_redis_response};
 use bufstream::BufStream;
 use mio::*;
-use mio_more::timer::Timer;
+use mio_more::timer::{Timer, Builder};
 use mio::tcp::{TcpStream};
 use std::collections::{VecDeque, HashMap};
 use std::string::String;
@@ -17,6 +17,7 @@ use cluster_backend::{ClusterBackend};
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum BackendStatus {
+    READY,
     CONNECTED,
     DISCONNECTED,
     CONNECTING,
@@ -109,10 +110,10 @@ impl Backend {
         }
     }
 
-    pub fn handle_timeout(&mut self, token: Token, timestamp: Instant) -> bool {
+    pub fn handle_timeout(&mut self, token: Token, target_timestamp: Instant) -> bool {
         match self.single {
-            BackendEnum::Single(ref mut backend) => backend.handle_timeout(timestamp),
-            BackendEnum::Cluster(ref mut backend) => backend.handle_timeout(token, timestamp),
+            BackendEnum::Single(ref mut backend) => backend.handle_timeout(target_timestamp),
+            BackendEnum::Cluster(ref mut backend) => backend.handle_timeout(token, target_timestamp),
         }
     }
 
@@ -173,7 +174,7 @@ pub struct SingleBackend {
     poll_registry: Rc<RefCell<Poll>>,
     written_sockets: *mut VecDeque<(Token, StreamType)>,
     socket: Option<BufStream<TcpStream>>,
-    timer: Option<Timer<()>>,
+    timer: Option<Timer<bool>>,
     pub timeout: usize,
 }
 impl SingleBackend {
@@ -213,13 +214,13 @@ impl SingleBackend {
     }
 
     pub fn is_available(&mut self) -> bool {
-        return self.status == BackendStatus::CONNECTED;
+        return self.status == BackendStatus::READY;
     }
 
     pub fn connect(
         &mut self,
     ) {
-        if self.status == BackendStatus::CONNECTED {
+        if self.status == BackendStatus::READY || self.status == BackendStatus::CONNECTED {
             debug!("Trying to connect when already connected!");
             return;
         }
@@ -230,12 +231,12 @@ impl SingleBackend {
         let socket = TcpStream::connect(&addr).unwrap();
         debug!("New socket to {}: {:?}", addr, socket);
 
-        self.change_state(BackendStatus::CONNECTING);
-
         debug!("Registered backend: {:?}", &self.token);
         self.poll_registry.borrow_mut().register(&socket, self.token, Ready::readable() | Ready::writable(), PollOpt::edge()).unwrap();
         self.socket = Some(BufStream::new(socket));
         self.subscribers_registry.borrow_mut().insert(self.token, Subscriber::PoolServer(self.parent_token()));
+
+        self.change_state(BackendStatus::CONNECTING);
     }
 
     // Callback after initializing a connection.
@@ -245,14 +246,31 @@ impl SingleBackend {
         */
         self.timer = None;
 
+        // TODO: Convert the following commands into redis protocol.
+
+        let mut wait_for_resp = false;
 
         // if auth, connect with password?
         if self.config.auth != String::new() {
             self.write_to_stream(NULL_TOKEN, "AUTH pass".to_owned());
+            wait_for_resp = true;
         }
         // If db, select db.
         if self.config.db != 0 {
             self.write_to_stream(NULL_TOKEN, "SELECT self.config.db".to_owned());
+            wait_for_resp = true;
+        }
+
+        if self.timeout != 0 {
+            self.write_to_stream(NULL_TOKEN, "PING\r\n".to_owned());
+            wait_for_resp = true;
+        }
+
+        if wait_for_resp {
+            self.flush_stream();
+        }
+        else {
+            self.change_state(BackendStatus::READY);
         }
     }
 
@@ -268,31 +286,48 @@ impl SingleBackend {
     // Returns a boolean, signifying whether to mark this backend as down or not.
     pub fn handle_timeout(
         &mut self,
-        timestamp: Instant
+        target_timestamp: Instant
     ) -> bool {
         debug!("Handling timeout: Timeout {:?}", self.token);
+
         if self.status == BackendStatus::DISCONNECTED {
+            self.timer = None;
             return false;
         }
         if self.queue.len() == 0 {
             return false;
         }
+                let timer_poll = self.timer.as_mut().unwrap().poll();
+                if timer_poll == None {
+                    debug!("KEX: Timer didn't actually fire, skipping");
+                    // TODO: For some reason, poll says timer is activated,but timer itself doesn't think so.
+                    return false;
+                }
         let head = {
             let head = self.queue.get(0).unwrap();
             head.clone()
         };
+        let ref time = head.1;
+        if &target_timestamp < time {
+            // Should we remove the timer here?
+            // In what cases do we have a timer firing with the wrong timestamp? Could be resolved already.
+            // Are there cases we want to fire it again?
+            // TODO: We need to rethink the whole timer system. Currently, there can only be one requesttimer per backend.
+            // But we can have requests slow down, and a certain threshold will be hit. IE. 48 ms, 49 ms, 50 ms THRESHOLD, 51 ms.
+            // The last 2 requests should timeout.
+            // This means that we need to save all the timestamps of each request?
+            // Or can we only record first and last?
+            // It seems like the mio timer might be able to take multiple timeouts? This would be nifty then.
+            self.timer = None;
+            return false;
+        }
 
         // Get rid of first queue.
         self.queue.pop_front();
 
-        let ref time = head.1;
-        if &timestamp < time {
-            return false;
-        }
-
         self.write_to_client(head.0, "-ERR RustProxy timed out\r\n".to_owned());
 
-        if &timestamp == time {
+        if &target_timestamp == time {
             if self.failure_limit > 0 {
                 self.failure_count += 1;
                 if self.failure_count >= self.failure_limit {
@@ -301,7 +336,7 @@ impl SingleBackend {
             }
         }
         else {
-            panic!("This shouldn't happen. Timestamp hit: {:?}. Missed previous timestamp: {:?}", timestamp, time);
+            panic!("This shouldn't happen. Timestamp hit: {:?}. Missed previous timestamp: {:?}", target_timestamp, time);
         }
         return false;
     }
@@ -309,9 +344,6 @@ impl SingleBackend {
     // Marks the backend as down. Returns an error message to all pending requests.
     // TODO: Is it still needed to have a mark_backend_down AND handle_backend_failure?
     pub fn mark_backend_down(&mut self) {
-        if self.status == BackendStatus::CONNECTED {
-            self.subscribers_registry.borrow_mut().remove(&Token(self.token.0 - 1));
-        }
         if self.socket.is_some() {
             let err = self.socket.as_mut().unwrap().get_mut().take_error();
             debug!("Previous socket error: {:?}", err);
@@ -353,7 +385,7 @@ impl SingleBackend {
         client_token: Token
     ) -> bool {
         match self.status {
-            BackendStatus::CONNECTED => {
+            BackendStatus::READY => {
                 self.write_to_stream(client_token, message.clone());
                 true
             }
@@ -365,7 +397,9 @@ impl SingleBackend {
     }
 
     pub fn handle_backend_response(&mut self) {
-        self.change_state(BackendStatus::CONNECTED);
+        if self.status != BackendStatus::READY {
+            self.change_state(BackendStatus::CONNECTED);
+        }
 
         // Read all responses if there are any left.
         while self.queue.len() > 0 {
@@ -376,7 +410,10 @@ impl SingleBackend {
             let client_token = match self.queue.pop_front() {
                 Some((client_token, _)) => client_token,
                 None => panic!("No more client token in backend queue, even though queue length was >0 just now!"),
-            };      
+            };
+            if client_token == NULL_TOKEN && response == "+PONG\r\n" {
+                self.change_state(BackendStatus::READY);
+            }
 
             self.write_to_client(client_token, response);
         }
@@ -390,8 +427,8 @@ impl SingleBackend {
     fn retry_connect(&mut self) {
         debug!("Creating timer");
         // Create new timer.
-        let mut timer = Timer::default();
-        let _ = timer.set_timeout(Duration::new(0, (1000000 * self.retry_timeout) as u32), ());
+        let mut timer = create_timer();
+        let _ = timer.set_timeout(Duration::new(0, (1000000 * self.retry_timeout) as u32), true);
         let timer_token = Token(self.token.0 + 1);
         self.poll_registry.borrow_mut().register(&timer, timer_token, Ready::readable(), PollOpt::level()).unwrap();
         // need to handle with specific function for token. How to know what token this is?
@@ -404,20 +441,24 @@ impl SingleBackend {
     }
 
     pub fn change_state(&mut self, target_state: BackendStatus) -> bool {
+        // TODO: Rethink change state flow.
         if self.status == target_state {
             return true;
         }
+        let prev_status = self.status;
         match (self.status, target_state) {
             // called when trying to establish a connection to backend.
             (BackendStatus::DISCONNECTED, BackendStatus::CONNECTING) => {}
-            (BackendStatus::CONNECTING, BackendStatus::CONNECTED) => {
-                // call handle_connection.
-                self.handle_connection();
-            } // happens when connection to backend has been established and is writable.
+             // happens when connection to backend has been established and is writable.
+            (BackendStatus::CONNECTING, BackendStatus::CONNECTED) => {}
+            // Happens when writable connection is validated with a PING (if timeout is enabled)
+            (BackendStatus::CONNECTED, BackendStatus::READY) => {}
             // Happens when the establishing connection to backend has timed out.
             (BackendStatus::CONNECTING, BackendStatus::DISCONNECTED) => {}
-            // happens when host has been blacked out from too many failures/timeouts.
+            // happens when host fails initializing PING
             (BackendStatus::CONNECTED, BackendStatus::DISCONNECTED) => {}
+            // happens when host has been blacked out from too many failures/timeouts.
+            (BackendStatus::READY, BackendStatus::DISCONNECTED) => {}
             _ => {
                 debug!("Backend {:?} failed to change state from {:?} to {:?}", self.token, self.status, target_state);
                 panic!("Failure to change states"); //return false;
@@ -425,6 +466,12 @@ impl SingleBackend {
         }
         debug!("Backend {:?} changed state from {:?} to {:?}", self.token, self.status, target_state);
         self.status = target_state;
+        match (prev_status, target_state) {
+            (BackendStatus::CONNECTING, BackendStatus::CONNECTED) => {
+                self.handle_connection();
+            }
+            _ => {}
+        }
         return true;
     }
 
@@ -479,16 +526,14 @@ impl SingleBackend {
         let now = Instant::now();
         let timestamp = now + Duration::from_millis(self.timeout as u64);
         self.queue.push_back((client_token, timestamp));
-        if self.queue.len() == 1 && self.timeout != 0 {
-            let mut timer = Timer::default();
-            let _ = timer.set_timeout(Duration::from_millis(self.timeout as u64), ());
+        if self.queue.len() == 1 && self.timeout != 0 {            let mut timer = create_timer();
+            let _ = timer.set_timeout(Duration::from_millis(self.timeout as u64), true);
             let timer_token = self.get_timeout_token();
-            self.poll_registry.borrow_mut().register(&timer, timer_token, Ready::readable(), PollOpt::level()).unwrap();
+            self.poll_registry.borrow_mut().register(&timer, timer_token, Ready::readable(), PollOpt::level() | PollOpt::oneshot()).unwrap();
             // need to handle with specific function for token. How to know what token this is?
             // can stuff into sockets. but it'll ahve timer token.
             self.timer = Some(timer);
-
-            self.subscribers_registry.borrow_mut().insert(self.get_timeout_token(), Subscriber::RequestTimeout(self.parent_token(), timestamp));
+            self.subscribers_registry.borrow_mut().insert(timer_token, Subscriber::RequestTimeout(self.parent_token(), timestamp));
         }
     }
 
@@ -510,10 +555,20 @@ impl SingleBackend {
     }
 
     fn get_timeout_token(&self) -> Token {
-        Token(self.token.0 + 1)
+        backend_to_timeout_token(&self.token)
     }
 }
 
+pub fn backend_to_timeout_token(token: &Token) -> Token {
+    Token(token.0 + 1)
+}
+
+pub fn timeout_to_backend_token(token: &Token) -> Token {
+    Token(token.0 - 1)
+}
+
+// This extracts the command from the stream.
+// TODO: Use a StreamingIterator: https://github.com/rust-lang/rfcs/pull/1598
 pub fn parse_redis_command(stream: &mut BufStream<TcpStream>) -> String {
     let mut command = String::new();
     let mut string = String::new();
@@ -571,4 +626,11 @@ pub fn parse_redis_command(stream: &mut BufStream<TcpStream>) -> String {
         _ => {}
     }
     command
+}
+
+// TODO: Should we want more clarity?
+fn create_timer() -> Timer<bool> {
+    let mut builder = Builder::default();
+    builder = builder.tick_duration(Duration::from_millis(10));
+    builder.build()
 }

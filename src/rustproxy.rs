@@ -1,3 +1,4 @@
+use backend::timeout_to_backend_token;
 use std::time::Instant;
 use admin;
 use config::{RustProxyConfig, BackendPoolConfig, load_config};
@@ -186,6 +187,8 @@ impl RustProxy {
             for event in events.iter() {
                 debug!("Event detected: {:?} {:?}", &event.token(), event.readiness());
                 self.handle_event(&event);
+                self.write_to_sockets();
+
             }
             self.write_to_sockets();
         }
@@ -297,12 +300,12 @@ impl RustProxy {
                     None => error!("Hashmap says it has token but it really doesn't! {:?}",subscriber),
                 }
             }
-            Subscriber::RequestTimeout(pool_token, timestamp) => {
-                debug!("RequestTimeout {:?} for Pool {:?}", token, pool_token);
+            Subscriber::RequestTimeout(pool_token, target_timestamp) => {
+                let backend_token = timeout_to_backend_token(&token);
+                debug!("RequestTimeout {:?} (Backend {:?}) for Pool {:?}", token, backend_token, pool_token);
                 match self.backendpools.get_mut(&pool_token.clone()) {
                     Some(pool) => {
-                        let backend_token = Token(token.0 - 1);
-                        pool.handle_timeout(backend_token, timestamp);
+                        pool.handle_timeout(backend_token, target_timestamp);
                     }
                     None => error!("Hashmap says it has token but it really doesn't! {:?}",subscriber),
                 }
