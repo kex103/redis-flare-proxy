@@ -297,7 +297,7 @@ impl ClusterBackend {
     }
  
     pub fn is_available(&mut self) -> bool {
-        return self.status == BackendStatus::CONNECTED;
+        return self.status == BackendStatus::READY;
     }
 
     pub fn connect(&mut self) {
@@ -308,72 +308,41 @@ impl ClusterBackend {
         self.change_state(BackendStatus::CONNECTING, NULL_TOKEN);
     }
 
-    pub fn handle_connection(&mut self, backend_token: Token) {
+    fn initialize_slotmap(&mut self, backend_token: Token) {
         let host = self.hosts.get_mut(&backend_token).unwrap();
-        //host.handle_connection();
         host.write_message("*2\r\n$7\r\nCLUSTER\r\n$5\r\nSLOTS\r\n".to_owned(), NULL_TOKEN);
         self.queue.push_back(host.queue.back().unwrap().clone());
     }
 
-    pub fn handle_backend_response(&mut self, token: Token) {
-        // TODO: this should just call backend's handle_backend_response, and intercept any commands for slotsmap.
-
-        // Grab response.
-        // Look up queue. If it is token 0.
-        // handle it.
+    pub fn handle_backend_response(&mut self, backend_token: BackendToken) {
         debug!("Queue: {:?}", self.queue);
-        self.hosts.get_mut(&token).unwrap().change_state(BackendStatus::CONNECTED);
-        self.change_state(BackendStatus::LOADING, token);
-        let response = self.hosts.get_mut(&token).unwrap().get_backend_response();
 
-        if response.len() == 0 {
-            return;
-        }
-        let client_token = match self.queue.pop_front() {
-            Some((client_token, _)) => client_token,
-            None => {
-                error!("!!!: No more client token in backend queue!");
-                return;
-            }
-        };
+        // Check if state changed to READY. If so, will want to change self state to CONNECTED.
+        let unhandled_responses = self.hosts.get_mut(&backend_token).unwrap().handle_backend_response();
 
+        self.change_state(BackendStatus::LOADING, backend_token);
 
-        // BUG: TODO: Move this to handle_connection
-        if client_token == NULL_TOKEN {
+        // TODO: Handle multiple responses. Assuming it's slotsmap.
+        for response in unhandled_responses {
             {
-            let mut register_backend = |host:String, start: usize, end: usize| {
-                debug!("Backend slots map registered! {} From {} to {}", host, start, end);
-                for i in start..end+1 {
-                    self.slots.remove(i);
-                    self.slots.insert(i, host.clone());
-                }
+                let mut register_backend = |host:String, start: usize, end: usize| {
+                    debug!("Backend slots map registered! {} From {} to {}", host, start, end);
+                    for i in start..end+1 {
+                        self.slots.remove(i);
+                        self.slots.insert(i, host.clone());
+                    }
 
-                if !self.hostnames.contains_key(&host) {
-                    self.initialize_host(host.clone());
-                    let backend_token = self.hostnames.get(&host).unwrap();
-                    self.hosts.get_mut(backend_token).unwrap().connect();
-                    self.register_backend_with_parent(backend_token.clone(), self.token.clone());
-                }
-            };
-            handle_slotsmap(response.clone(), &mut register_backend);
+                    if !self.hostnames.contains_key(&host) {
+                        self.initialize_host(host.clone());
+                        let backend_token = self.hostnames.get(&host).unwrap();
+                        self.hosts.get_mut(backend_token).unwrap().connect();
+                        self.register_backend_with_parent(backend_token.clone(), self.token.clone());
+                    }
+                };
+                handle_slotsmap(response.clone(), &mut register_backend);
             }
-            self.change_state(BackendStatus::CONNECTED, NULL_TOKEN);
+            self.change_state(BackendStatus::READY, NULL_TOKEN);
             return;
-        }
-
-        match self.parent_clients().get_mut(&client_token) {
-            Some(stream) => {
-                debug!("Wrote to client: {:?}", response);
-                let _ = stream.write(&response.into_bytes()[..]);
-                self.register_written_socket(client_token, StreamType::PoolClient);
-            }
-            _ => error!("!!!: Found listener instead of stream!"),
-        }
-
-        // Check that backend has information in the socket still.
-        if self.queue.len() > 0 {
-            debug!("Still ahve leftover in backned!");
-            self.handle_backend_response(token);
         }
     }
 
@@ -382,26 +351,25 @@ impl ClusterBackend {
     }
 
     fn change_state(&mut self, target_state: BackendStatus, backend_token: BackendToken) -> bool {
-
         if self.status == target_state {
             return true;
         }
+        let prev_state = self.status;
+        // For cluster, should go from CONNECTING (waiting for connection) => LOADING(Waiting for slotsmap) => READY (slotsmap returned)
         match (self.status, target_state) {
             (BackendStatus::DISCONNECTED, BackendStatus::CONNECTING) => {} // called when trying to establish a connection to backend.
-            (BackendStatus::CONNECTING, BackendStatus::LOADING) => {
-                self.handle_connection(backend_token);
-            }
+            (BackendStatus::CONNECTING, BackendStatus::LOADING) => {}
+            (BackendStatus::LOADING, BackendStatus::READY) => {}
 
             // State transitions we want to ignore. Why? Because we don't want to keep track of the fact that we're calling a transition to CONNECTED
             // twice. Instead, we'll have subsequent transitions just fail silently.
-            (BackendStatus::CONNECTED, BackendStatus::LOADING) => {
+            (BackendStatus::READY, BackendStatus::LOADING) => {
                 return true;
             }
 
-            (BackendStatus::LOADING, BackendStatus::CONNECTED) => {}
             (BackendStatus::CONNECTING, BackendStatus::DISCONNECTED) => {} // Happens when the establishing connection to backend has timed out.
             (BackendStatus::LOADING, BackendStatus::DISCONNECTED) => {}
-            (BackendStatus::CONNECTED, BackendStatus::DISCONNECTED) => {} // happens when host has been blacked out from too many failures/timeouts.
+            (BackendStatus::READY, BackendStatus::DISCONNECTED) => {} // happens when host has been blacked out from too many failures/timeouts.
             _ => {
                 debug!("ClusterBackend {:?} failed to change state from {:?} to {:?}", self.token, self.status, target_state);
                 panic!("Failure to change states");
@@ -409,6 +377,13 @@ impl ClusterBackend {
         }
         debug!("ClusterBackend {:?} changed state from {:?} to {:?}", self.token, self.status, target_state);
         self.status = target_state;
+
+        match (prev_state, target_state) {
+            (BackendStatus::CONNECTING, BackendStatus::LOADING) => {
+                self.initialize_slotmap(backend_token);
+            }
+            _ => {}
+        }
         return true;
     }
 

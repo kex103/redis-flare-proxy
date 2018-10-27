@@ -146,9 +146,11 @@ impl Backend {
 
     pub fn handle_backend_response(&mut self, token: Token) {
         match self.single {
-            BackendEnum::Single(ref mut backend) => backend.handle_backend_response(),
+            BackendEnum::Single(ref mut backend) => {
+                backend.handle_backend_response();
+            }
             BackendEnum::Cluster(ref mut backend) => backend.handle_backend_response(token),
-        }
+        };
     }
 
     pub fn handle_backend_failure(&mut self, token: Token) {
@@ -396,27 +398,35 @@ impl SingleBackend {
         }
     }
 
-    pub fn handle_backend_response(&mut self) {
-        if self.status != BackendStatus::READY {
-            self.change_state(BackendStatus::CONNECTED);
-        }
+    pub fn handle_backend_response(&mut self) -> VecDeque<String> {
+        self.change_state(BackendStatus::CONNECTED);
+
+        let mut unhandled_internal_responses = VecDeque::new();
 
         // Read all responses if there are any left.
         while self.queue.len() > 0 {
             let response = self.get_backend_response();
             if response.len() == 0 {
-                return;
+                return unhandled_internal_responses;
             }
             let client_token = match self.queue.pop_front() {
                 Some((client_token, _)) => client_token,
                 None => panic!("No more client token in backend queue, even though queue length was >0 just now!"),
             };
-            if client_token == NULL_TOKEN && response == "+PONG\r\n" {
-                self.change_state(BackendStatus::READY);
+            self.write_to_client(client_token, response.clone());
+            if client_token == NULL_TOKEN {
+                self.handle_internal_response(response, &mut unhandled_internal_responses);
             }
-
-            self.write_to_client(client_token, response);
         }
+        return unhandled_internal_responses;
+    }
+
+    fn handle_internal_response(&mut self, response: String, unhandled_queue: &mut VecDeque<String>) {
+        if response == "+PONG\r\n" {
+            self.change_state(BackendStatus::READY);
+            return;
+        }
+        unhandled_queue.push_back(response.clone());
     }
 
     pub fn handle_backend_failure(&mut self) {
@@ -453,6 +463,7 @@ impl SingleBackend {
             (BackendStatus::CONNECTING, BackendStatus::CONNECTED) => {}
             // Happens when writable connection is validated with a PING (if timeout is enabled)
             (BackendStatus::CONNECTED, BackendStatus::READY) => {}
+            (BackendStatus::READY, BackendStatus::CONNECTED) => { return true; }
             // Happens when the establishing connection to backend has timed out.
             (BackendStatus::CONNECTING, BackendStatus::DISCONNECTED) => {}
             // happens when host fails initializing PING
