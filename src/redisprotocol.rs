@@ -119,7 +119,6 @@ fn test_hashing_speed() {
     info!("Time spent with fnv1a2: {:?}", Instant::now() - start);
 }
 
-
 use std::default::Default;
 use std::hash::{BuildHasherDefault};
 use std::collections::{HashMap, HashSet};

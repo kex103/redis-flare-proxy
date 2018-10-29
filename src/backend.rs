@@ -103,27 +103,10 @@ impl Backend {
         }
     }
 
-    pub fn next_timeout(&self) -> Option<Instant> {
-        match self.single {
-            BackendEnum::Single(ref backend) => backend.next_timeout(),
-            BackendEnum::Cluster(ref backend) => backend.next_timeout(),
-        }
-    }
-
     pub fn handle_timeout(&mut self, token: Token, target_timestamp: Instant) -> bool {
         match self.single {
             BackendEnum::Single(ref mut backend) => backend.handle_timeout(target_timestamp),
             BackendEnum::Cluster(ref mut backend) => backend.handle_timeout(token, target_timestamp),
-        }
-    }
-
-    
-    pub fn mark_backend_down(
-        &mut self,
-    ) {
-        match self.single {
-            BackendEnum::Single(ref mut backend) => backend.mark_backend_down(),
-            BackendEnum::Cluster(ref mut _backend) => panic!("unimplemented")
         }
     }
 
@@ -243,12 +226,9 @@ impl SingleBackend {
 
     // Callback after initializing a connection.
     fn handle_connection(&mut self) {
-        /*
-            Are there any situations where self.timer is used for a request timeout, and not a retry timeout here?
-        */
         self.timer = None;
 
-        // TODO: Convert the following commands into redis protocol.
+        // TODO: Use a macro to encode the requests into redis protocol.
 
         let mut wait_for_resp = false;
 
@@ -273,14 +253,6 @@ impl SingleBackend {
         }
         else {
             self.change_state(BackendStatus::READY);
-        }
-    }
-
-    // Retrieves the next timeout time in the message queue.
-    pub fn next_timeout(&self) -> Option<Instant> {
-        match self.queue.get(0) {
-            Some(request) => Some(request.1),
-            None => None,
         }
     }
 
@@ -426,7 +398,7 @@ impl SingleBackend {
             self.change_state(BackendStatus::READY);
             return;
         }
-        unhandled_queue.push_back(response.clone());
+        unhandled_queue.push_back(response);
     }
 
     pub fn handle_backend_failure(&mut self) {

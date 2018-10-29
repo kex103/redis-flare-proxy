@@ -203,10 +203,6 @@ impl BackendPool {
         }
     }
 
-    pub fn next_timeout(&mut self, token: Token) -> Option<Instant> {
-        return self.get_backend(token).next_timeout();
-    }
-
     fn mark_backend_down(
         &mut self,
         token: Token,

@@ -2,18 +2,13 @@ use rustproxy::{BackendToken, PoolToken, ClientToken, generate_backend_token, St
 use backend::{BackendStatus, Host, SingleBackend};
 use backendpool::BackendPool;
 use config::BackendConfig;
-use bufstream::BufStream;
-use mio::tcp::{TcpStream};
 use std::collections::{VecDeque, HashMap};
 use crc16::*;
-use mio::Token;
-use mio::Poll;
-use std::io::Write;
+use mio::{Token, Poll};
 use std::time::Instant;
 use std::str::FromStr;
 use std::str::CharIndices;
-use std::cell::Cell;
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::rc::Rc;
 use std::ops::Index;
 use std;
@@ -387,13 +382,6 @@ impl ClusterBackend {
         return true;
     }
 
-    pub fn next_timeout(&self) -> Option<Instant> {
-        match self.queue.get(0) {
-            Some(request) => Some(request.1),
-            None => None,
-        }
-    }
-
     // callback when a timeout has occurred.
     pub fn handle_timeout(
         &mut self,
@@ -464,24 +452,10 @@ impl ClusterBackend {
         }
     }
 
-    fn parent_clients(&self) -> &mut HashMap<Token, BufStream<TcpStream>> {
-        unsafe {
-            let parent_pool = &mut *self.parent;
-            return &mut parent_pool.client_sockets;
-        }
-    }
-
     fn register_backend_with_parent(&self, backend_token: Token, owner_backend_token: Token) {
         unsafe {
             let parent_pool = &mut *self.parent;
             parent_pool.all_backend_tokens.insert(backend_token, owner_backend_token);
         }
-    }
-
-    fn register_written_socket(&self, token: Token, stream_type: StreamType) {
-        let written_sockets = unsafe {
-            &mut *self.written_sockets
-        };
-        written_sockets.push_back((token, stream_type));
     }
 }
