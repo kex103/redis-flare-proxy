@@ -161,6 +161,9 @@ pub struct SingleBackend {
     socket: Option<BufStream<TcpStream>>,
     timer: Option<Timer<bool>>,
     pub timeout: usize,
+    waiting_for_auth_resp: bool,
+    waiting_for_db_resp: bool,
+    waiting_for_ping_resp: bool,
 }
 impl SingleBackend {
     pub fn new(
@@ -194,6 +197,9 @@ impl SingleBackend {
             socket: None,
             timer: None,
             written_sockets: written_sockets as *mut VecDeque<(Token, StreamType)>,
+            waiting_for_auth_resp: false,
+            waiting_for_db_resp: false,
+            waiting_for_ping_resp: false,
         };
         (backend, Vec::new())
     }
@@ -232,19 +238,34 @@ impl SingleBackend {
 
         let mut wait_for_resp = false;
 
-        // if auth, connect with password?
+        // TODO: Cache the string pushing to config initialization.
         if self.config.auth != String::new() {
-            self.write_to_stream(NULL_TOKEN, "AUTH pass".to_owned());
+            let mut request = String::with_capacity(14 + self.config.auth.len());
+            request.push_str("*2\r\n$4\r\nAUTH\r\n$");
+            request.push_str(&self.config.auth.len().to_string());
+            request.push_str("\r\n");
+            request.push_str(&self.config.auth);
+            request.push_str("\r\n");
+            self.write_to_stream(NULL_TOKEN, request);
+            self.waiting_for_auth_resp = true;
             wait_for_resp = true;
         }
-        // If db, select db.
+
         if self.config.db != 0 {
+            let mut request = String::with_capacity(14 + self.config.auth.len());
+            request.push_str("*2\r\n$6\r\nSELECT\r\n$");
+            request.push_str(&self.config.db.to_string().len().to_string());
+            request.push_str("\r\n");
+            request.push_str(&self.config.db.to_string());
+            request.push_str("\r\n");
             self.write_to_stream(NULL_TOKEN, "SELECT self.config.db".to_owned());
+            self.waiting_for_db_resp = true;
             wait_for_resp = true;
         }
 
         if self.timeout != 0 {
             self.write_to_stream(NULL_TOKEN, "PING\r\n".to_owned());
+            self.waiting_for_ping_resp = true;
             wait_for_resp = true;
         }
 
@@ -394,11 +415,23 @@ impl SingleBackend {
     }
 
     fn handle_internal_response(&mut self, response: String, unhandled_queue: &mut VecDeque<String>) {
-        if response == "+PONG\r\n" {
-            self.change_state(BackendStatus::READY);
+        // TODO: Handle the various requirements.
+        if self.waiting_for_auth_resp && response == "+OK\r\n" {
+            self.waiting_for_auth_resp = false;
+        }
+        else if self.waiting_for_db_resp && response == "+OK\r\n" {
+            self.waiting_for_db_resp = false;
+        }
+        else if self.waiting_for_ping_resp && response == "+PONG\r\n" {
+            self.waiting_for_ping_resp = false;
+        }
+        else {
+            unhandled_queue.push_back(response);
             return;
         }
-        unhandled_queue.push_back(response);
+        if !self.waiting_for_auth_resp && !self.waiting_for_db_resp && !self.waiting_for_ping_resp {
+            self.change_state(BackendStatus::READY);
+        }
     }
 
     pub fn handle_backend_failure(&mut self) {
@@ -512,7 +545,7 @@ impl SingleBackend {
         if self.queue.len() == 1 && self.timeout != 0 {            let mut timer = create_timer();
             let _ = timer.set_timeout(Duration::from_millis(self.timeout as u64), true);
             let timer_token = self.get_timeout_token();
-            self.poll_registry.borrow_mut().register(&timer, timer_token, Ready::readable(), PollOpt::level() | PollOpt::oneshot()).unwrap();
+            self.poll_registry.borrow_mut().register(&timer, timer_token, Ready::readable(), PollOpt::edge() | PollOpt::oneshot()).unwrap();
             // need to handle with specific function for token. How to know what token this is?
             // can stuff into sockets. but it'll ahve timer token.
             self.timer = Some(timer);

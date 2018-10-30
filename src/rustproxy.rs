@@ -80,6 +80,7 @@ pub struct RustProxy {
     pub written_sockets: Box<VecDeque<(Token, StreamType)>>,
     poll: Rc<RefCell<Poll>>,
     next_socket_index: Rc<Cell<usize>>,
+    running: bool,
 }
 impl RustProxy {
     pub fn new(config_path: String) -> Result<RustProxy, String> {
@@ -104,6 +105,7 @@ impl RustProxy {
             subscribers: subscribers,
             written_sockets: Box::new(VecDeque::new()),
             poll: poll,
+            running: true,
         };
         // Populate backend pools.
         let pools_config = rustproxy.config.pools.clone();
@@ -176,19 +178,17 @@ impl RustProxy {
 
     pub fn run(&mut self) {
         let mut events = Events::with_capacity(1024);
-        loop {
-            {
+        while self.running {
             match self.poll.borrow_mut().poll(&mut events, None) {
                 Ok(_poll_size) => {}
                 Err(error) => {
                     panic!("Error polling. Shutting down: {:?}", error);
                 }
-            };}
+            };
             for event in events.iter() {
                 debug!("Event detected: {:?} {:?}", &event.token(), event.readiness());
                 self.handle_event(&event);
                 self.write_to_sockets();
-
             }
             self.write_to_sockets();
         }
@@ -452,7 +452,8 @@ impl RustProxy {
                 }
             }
             Some("SHUTDOWN") => {
-                process::exit(0);
+                self.running = false;
+               "OK".to_owned()
             }
             Some("STAGEDCONFIG") => {
                 let staged_config = self.get_staged_config();

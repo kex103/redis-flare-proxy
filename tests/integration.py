@@ -18,6 +18,10 @@ def kill_redis_server(port):
             r.shutdown()
             print("Killed redis server at port: {}".format(port))
             return
+    except redis.exceptions.ResponseError, e:
+        # TODO: kill the instance
+
+        pass
     except redis.exceptions.ConnectionError, e:
         pass
 
@@ -106,35 +110,49 @@ class TestRustProxy(unittest.TestCase):
             if not os.path.isdir(f) and ".conf" in f:
                 os.remove("tests/tmp/{}".format(f))
 
-        kill_redis_server(6380)
-        kill_redis_server(6381)
-        kill_redis_server(6382)
-        kill_redis_server(6383)
-        kill_redis_server(6384)
-        kill_redis_server(7000)
-        kill_redis_server(7001)
-        kill_redis_server(7002)
+        # TODO: Verify that ports aren't being used.
+       # kill_redis_server(6380)
+        ##kill_redis_server(6381)
+     #   kill_redis_server(6382)
+      #  kill_redis_server(6383)
+       # kill_redis_server(6384)
+        #kill_redis_server(7000)
+      #  kill_redis_server(7001)
+       # kill_redis_server(7002)
 
     def tearDown(self):
         for proxy_admin_port in self.proxy_admin_ports:
             try:
                 r = redis.Redis(port=proxy_admin_port)
                 r.shutdown()
-            except e:
+            except:
                 pass
 
         for subprocess in self.subprocesses:
             subprocess.kill()
 
-    def start_redis_server(self, port):
+    def start_redis_server(self, port, password=None, config_path=None):
         FNULL = open(os.devnull, 'w')
-        process = subprocess.Popen(["redis-server", "--port", "{}".format(port)], stdout=FNULL, stderr=subprocess.STDOUT)
-
-        time.sleep(1.0)
-        r = redis.Redis(port=port)
-        if not r.ping():
-            raise AssertionError('Redis server is unavailable at port: {}. Stopping test.'.format(port))
+        command = ["redis-server"]
+        if config_path:
+            command.append(str(config_path))
+        if password:
+            command = command + ["--requirepass", str(password)]
+        command = command + ["--port", str(port)]
+        process = subprocess.Popen(command, stdout=FNULL, stderr=subprocess.STDOUT)
         self.subprocesses.append(process)
+
+        r = redis.Redis(port=port, password=password)
+        attempts_remaining = 4
+        while attempts_remaining:
+            try:
+                if not r.ping():
+                    raise AssertionError('Redis server is unavailable at port: {}. Stopping test.'.format(port))
+                return process
+            except redis.ConnectionError:
+                attempts_remaining = attempts_remaining - 1
+                time.sleep(0.1)
+        raise AssertionError('Redis server did not start at port: {}'.format(port))
 
     def start_redis_cluster_server(self, port):
         FNULL = open(os.devnull, 'w')
@@ -165,18 +183,20 @@ class TestRustProxy(unittest.TestCase):
                 raise AssertionError('Redis cluster server {} failed to add slot {}. Stopping test.'.format(ports[port_index], i))
         time.sleep(1.0);
 
-    def start_rustproxy(self, config_path):
-        log_out = open("tests/log/{}.stdout".format(self._testMethodName), 'w')
+    def start_rustproxy(self, config_path, tag=""):
+        log_file = "tests/log/{}{}.stdout".format(self._testMethodName, tag)
+        log_out = open(log_file, 'w')
         args = ["-c{}".format(
             config_path),
             "-l DEBUG"]
         env = os.environ.copy()
         env['RUST_BACKTRACE'] = '1'
         process = subprocess.Popen(["cargo", "run", "--bin", "rustproxy", "--"] + args, stdout=log_out, stderr=subprocess.STDOUT, env=env)
-        time.sleep(1);
+        time.sleep(0.5); # TODO: wait until rustproxy initializes.
         self.subprocesses.append(process)
-        # Get the port name to remove.
+        # TODO: Get the port name to remove.
         self.proxy_admin_ports.append(1530)
+        return process
 
     def start_delayer(self, incoming_port, outgoing_port, delay, admin_port=None):
         log_out = open("tests/log/{}.delayer{}.stdout".format(self._testMethodName, incoming_port), 'w')
@@ -326,6 +346,51 @@ class TestRustProxy(unittest.TestCase):
         # TODO: Verify hashtag pairs.
 
         # TODO: Verify that more than 2 chars in a hashtag is invalid.
+
+    def test_auth(self):
+        # Start a server with auth.password required.
+        self.start_redis_server(6381, password="password1")
+        self.start_delayer(incoming_port=6380, outgoing_port=6381, delay=1, admin_port=6382)
+
+        # 1. Verify that with config with the correct auth config can access the server.
+        self.start_rustproxy("tests/conf/auth1.toml", tag=1)
+        verify_redis_connection(1531)
+
+        # 2. Verify that with right config, the server can be disconnected, reconnected, and will still work.
+        conn_to_delayer1 = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        conn_to_delayer1.connect(("0.0.0.0", 6382))
+        conn_to_delayer1.sendall("SETDELAY 400")
+
+        verify_redis_error(1531, "RustProxy timed out")
+        verify_redis_error(1531, "ERROR: Not connected")
+
+        conn_to_delayer1.sendall("SETDELAY 1")
+        time.sleep(1.5)
+        verify_redis_connection(1531)
+
+        # 3. Verify that with the right config, the proxy can be reconfigured to the wrong one, and will not work.
+        r = redis.Redis(port=1530)
+        response = r.execute_command("LOADCONFIG tests/conf/auth2.toml")
+        self.assertTrue(response)
+        response = r.execute_command("SWITCHCONFIG")
+        self.assertTrue(response)
+        verify_redis_error(1531, "ERROR: Not connected")
+
+        response = r.execute_command("SHUTDOWN")
+        self.assertTrue(response);
+
+        # 4. Verify that without config, the server is considered down (unauthorized)
+        self.start_rustproxy("tests/conf/testconfig1.toml", tag=2)
+        verify_redis_error(1531, "NOAUTH Authentication required.")
+
+        # 5. Verify that with no config, the proxy can be reconfigured to the correct one,and will work.
+        r = redis.Redis(port=1530)
+        response = r.execute_command("LOADCONFIG tests/conf/auth1.toml")
+        self.assertTrue(response)
+        response = r.execute_command("SWITCHCONFIG")
+        self.assertTrue(response)
+        time.sleep(1)
+        verify_redis_connection(1531)
 
     def test_backend_ejection(self):
         # Test that auto backend host ejection works as expected.
@@ -494,7 +559,7 @@ class TestRustProxy(unittest.TestCase):
         verify_redis_error(1531, "ERROR: Not connected")
 
         self.start_redis_server(6380)
-        time.sleep(0.5)
+        time.sleep(1) # TODO: Configure different retry frequencies besides 1 second
 
         verify_redis_connection(1531)
 

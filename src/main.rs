@@ -110,4 +110,5 @@ fn main() {
 
     let mut rustproxy = rustproxy::RustProxy::new(config_path.to_owned()).unwrap();
     rustproxy.run();
+    debug!("Finished.");
 }

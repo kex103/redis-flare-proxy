@@ -273,7 +273,7 @@ impl BackendPool {
             match self.client_sockets.get_mut(&client_token) {
                 Some(stream) => {
                     let result = stream.read_to_string(&mut buf);
-                    debug!("Read from client: {} ({})", buf, buf.len());
+                    debug!("Read from client:\n{} ({})", buf, buf.len());
                     match result {
                         Ok(size) => {
                             debug!("Length: {}", size);
