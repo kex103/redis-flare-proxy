@@ -258,7 +258,7 @@ impl SingleBackend {
             request.push_str("\r\n");
             request.push_str(&self.config.db.to_string());
             request.push_str("\r\n");
-            self.write_to_stream(NULL_TOKEN, "SELECT self.config.db".to_owned());
+            self.write_to_stream(NULL_TOKEN, request);
             self.waiting_for_db_resp = true;
             wait_for_resp = true;
         }

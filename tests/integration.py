@@ -198,7 +198,7 @@ class TestRustProxy(unittest.TestCase):
         self.proxy_admin_ports.append(1530)
         return process
 
-    def start_delayer(self, incoming_port, outgoing_port, delay, admin_port=None):
+    def start_delayer(self, incoming_port, outgoing_port, delay, admin_port=6400):
         log_out = open("tests/log/{}.delayer{}.stdout".format(self._testMethodName, incoming_port), 'w')
         FNULL = open(os.devnull, 'w')
         process = subprocess.Popen(
@@ -207,6 +207,16 @@ class TestRustProxy(unittest.TestCase):
         )
         self.subprocesses.append(process)
 
+        attempts_remaining = 3
+        while attempts_remaining:
+            try:
+                admin_conn = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+                admin_conn.connect(("0.0.0.0", admin_port))
+                return admin_conn
+            except socket.error:
+                time.sleep(0.1)
+                attempts_remaining = attempts_remaining - 1
+        raise AssertionError('Unable to connect to delayer admin_port {} after starting'.format(admin_port))
 
     def test_single_backend_no_timeout(self):
         self.start_redis_server(6380)
@@ -392,6 +402,75 @@ class TestRustProxy(unittest.TestCase):
         time.sleep(1)
         verify_redis_connection(1531)
 
+    def test_db(self):
+        self.start_redis_server(6380)
+        self.start_redis_server(6382)
+        delayer = self.start_delayer(incoming_port=6381, outgoing_port=6380, delay=0, admin_port=6383)
+        ports = [6380, 6382]
+        r1 = redis.Redis(port=6380)
+        r2 = redis.Redis(port=6380, db=1)
+        r3 = redis.Redis(port=6380, db=2)
+
+        # 1. Verify that db is selected properly.
+        self.start_rustproxy("tests/conf/db1.toml")
+
+        populate_redis_key(1531, "key1")
+        populate_redis_key(1531, "key2")
+        populate_redis_key(1531, "key3")
+        populate_redis_key(1531, "key4")
+        populate_redis_key(1531, "key5")
+
+        response = r1.execute_command("DBSIZE")
+        self.assertEquals(response, 0)
+        response = r2.execute_command("DBSIZE")
+        self.assertEquals(response, 3)
+        response = r3.execute_command("DBSIZE")
+        self.assertEquals(response, 0)
+
+        flush_keys(ports)
+
+        # 2. Verify switching configs with a different db.
+        r = redis.Redis(port=1530)
+        response = r.execute_command("LOADCONFIG tests/conf/db2.toml")
+        self.assertTrue(response)
+        response = r.execute_command("SWITCHCONFIG")
+        self.assertTrue(response)
+
+        populate_redis_key(1531, "key1")
+        populate_redis_key(1531, "key2")
+        populate_redis_key(1531, "key3")
+        populate_redis_key(1531, "key4")
+        populate_redis_key(1531, "key5")
+
+        response = r1.execute_command("DBSIZE")
+        self.assertEquals(response, 0)
+        response = r2.execute_command("DBSIZE")
+        self.assertEquals(response, 0)
+        response = r3.execute_command("DBSIZE")
+        self.assertEquals(response, 3)
+
+        flush_keys(ports)
+
+        # 3. Verify that disconnecting and reconnecting results in same db being used.
+        delayer.sendall("SETDELAY 400")
+        verify_redis_error(1531, "RustProxy timed out", key="key1")
+        verify_redis_error(1531, "ERROR: Not connected", key="key1")
+        delayer.sendall("SETDELAY 0")
+        time.sleep(1)
+
+        populate_redis_key(1531, "key1")
+        populate_redis_key(1531, "key2")
+        populate_redis_key(1531, "key3")
+        populate_redis_key(1531, "key4")
+        populate_redis_key(1531, "key5")
+
+        response = r1.execute_command("DBSIZE")
+        self.assertEquals(response, 0)
+        response = r2.execute_command("DBSIZE")
+        self.assertEquals(response, 0)
+        response = r3.execute_command("DBSIZE")
+        self.assertEquals(response, 3)
+
     def test_backend_ejection(self):
         # Test that auto backend host ejection works as expected.
         # 1. Verify that when a host fails enough times, all requests get shifted by the modula.
@@ -428,7 +507,7 @@ class TestRustProxy(unittest.TestCase):
         # Set a long delay, so that all requests to the backend will time out.
         conn_to_delayer1 = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         conn_to_delayer1.connect(("0.0.0.0", 6385))
-        conn_to_delayer1.sendall("SETDELAY 401")
+        conn_to_delayer1.sendall("SETDELAY 400")
 
         # Send a request to the bad backend, to make Rustproxy realize it is down.
         # TODO: One feature is have proxy ping health checks to backends periodically.
