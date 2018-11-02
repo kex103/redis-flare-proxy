@@ -36,17 +36,25 @@ pub fn extract_key(command: &String) -> Result<String, RedisProtocolError> {
     };
     debug!("First word: {}", first_word);
     let maybe_key = match first_word.to_owned().to_uppercase().as_str() {
+    // Keys
         "DEL"              => { iter.next(); iter.next() }
         "DUMP"             => { iter.next(); iter.next() }
+        "EXISTS"           => { iter.next(); iter.next() }
+        "EXPIRE"           => { iter.next(); iter.next() }
         "EXPIREAT"         => { iter.next(); iter.next() }
         "PERSIST"          => { iter.next(); iter.next() }
+        "PEXPIRE"          => { iter.next(); iter.next() }
         "PEXPIREAT"        => { iter.next(); iter.next() }
         "PTTL"             => { iter.next(); iter.next() }
         "RESTORE"          => { iter.next(); iter.next() }
         "SORT"             => { iter.next(); iter.next() }
+        "TOUCH"            => { iter.next(); iter.next() }
         "TTL"              => { iter.next(); iter.next() }
         "TYPE"             => { iter.next(); iter.next() }
+        "UNLINK"           => { iter.next(); iter.next() }
+    // Strings
         "APPEND"           => { iter.next(); iter.next() }
+        "BITFIELD"         => { iter.next(); iter.next() }
         "BITCOUNT"         => { iter.next(); iter.next() }
         "BITPOS"           => { iter.next(); iter.next() }
         "DECR"             => { iter.next(); iter.next() }
@@ -65,8 +73,97 @@ pub fn extract_key(command: &String) -> Result<String, RedisProtocolError> {
         "SETNX"            => { iter.next(); iter.next() }
         "SETRANGE"         => { iter.next(); iter.next() }
         "STRLEN"           => { iter.next(); iter.next() }
-        "COMMAND"       => { Some("key0") }
-        "PING"          => { Some("key0") }
+    // Hashes
+        "HDEL"             => { iter.next(); iter.next() }
+        "HEXISTS"          => { iter.next(); iter.next() }
+        "HGET"             => { iter.next(); iter.next() }
+        "HGETALL"          => { iter.next(); iter.next() }
+        "HINCRBY"          => { iter.next(); iter.next() }
+        "HINCRBYFLOAT"     => { iter.next(); iter.next() }
+        "HKEYS"            => { iter.next(); iter.next() }
+        "HLEN"             => { iter.next(); iter.next() }
+        "HMGET"            => { iter.next(); iter.next() }
+        "HMSET"            => { iter.next(); iter.next() }
+        "HSCAN"            => { iter.next(); iter.next() }
+        "HSET"             => { iter.next(); iter.next() }
+        "HSETNX"           => { iter.next(); iter.next() }
+        "HSTRLEN"          => { iter.next(); iter.next() }
+        "HVALS"            => { iter.next(); iter.next() }
+    // Lists
+        "BLPOP"            => { iter.next(); iter.next() }
+        "BRPOP"            => { iter.next(); iter.next() }
+        //"BRPOPLPUSH"
+        "LINDEX"           => { iter.next(); iter.next() }
+        "LINSERT"          => { iter.next(); iter.next() }
+        "LLEN"             => { iter.next(); iter.next() }
+        "LPOP"             => { iter.next(); iter.next() }
+        "LPUSH"            => { iter.next(); iter.next() }
+        "LPUSHX"           => { iter.next(); iter.next() }
+        "LRANGE"           => { iter.next(); iter.next() }
+        "LREM"             => { iter.next(); iter.next() }
+        "LSET"             => { iter.next(); iter.next() }
+        "LTRIM"            => { iter.next(); iter.next() }
+        "RPOP"             => { iter.next(); iter.next() }
+        //"RPOPLPUSH"
+        "RPUSH"            => { iter.next(); iter.next() }
+        "RPUSHX"           => { iter.next(); iter.next() }
+    // Sets
+        "SADD"             => { iter.next(); iter.next() }
+        "SCARD"            => { iter.next(); iter.next() }
+        //"SDIFF"
+        //"SDIFFSTORE"
+        //"SINTER"
+        //"SINTERSTORE"
+        "SISMEMBER"        => { iter.next(); iter.next() }
+        "SMEMBERS"         => { iter.next(); iter.next() }
+        //"SMOVE"            => { iter.next(); iter.next() }
+        "SPOP"             => { iter.next(); iter.next() }
+        "SRANDMEMBER"      => { iter.next(); iter.next() }
+        "SREM"             => { iter.next(); iter.next() }
+        "SSCAN"            => { iter.next(); iter.next() }
+        //"SUNION
+        //"SUNIONSTORE"
+    // Sorted sets
+        "BZPOPMAX"         => { iter.next(); iter.next() }
+        "BZPOPMIN"         => { iter.next(); iter.next() }
+        "ZADD"             => { iter.next(); iter.next() }
+        "ZCARD"            => { iter.next(); iter.next() }
+        "ZCOUNT"           => { iter.next(); iter.next() }
+        "ZINCRBY"          => { iter.next(); iter.next() }
+        //"ZINTERSTORE"
+        "ZLEXCOUNT"        => { iter.next(); iter.next() }
+        "ZPOPMAX"          => { iter.next(); iter.next() }
+        "ZPOPMIN"          => { iter.next(); iter.next() }
+        "ZRANGE"           => { iter.next(); iter.next() }
+        "ZRANGEBYLEX"      => { iter.next(); iter.next() }
+        "ZRANGEBYSCORE"    => { iter.next(); iter.next() }
+        "ZRANK"            => { iter.next(); iter.next() }
+        "ZREM"             => { iter.next(); iter.next() }
+        "ZREMRANGEBYLEX"   => { iter.next(); iter.next() }
+        "ZREMRANGEBYRANK"  => { iter.next(); iter.next() }
+        "ZREMRANGEBYSCORE" => { iter.next(); iter.next() }
+        "ZREVRANGE"        => { iter.next(); iter.next() }
+        "ZREVRANGEBYLEX"   => { iter.next(); iter.next() }
+        "ZREVRANGEBYSCORE" => { iter.next(); iter.next() }
+        "ZREVRANK"         => { iter.next(); iter.next() }
+        "ZSCAN"            => { iter.next(); iter.next() }
+        "ZSCORE"           => { iter.next(); iter.next() }
+        //"ZUNIONSTORE"
+    // Hyperloglog
+        "PFADD"            => { iter.next(); iter.next() }
+        "PFCOUNT"          => { iter.next(); iter.next() }
+        //"PFMERGE"
+    // Geo
+        "GEOADD"           => { iter.next(); iter.next() }
+        "GEODIST"          => { iter.next(); iter.next() }
+        "GEOHASH"          => { iter.next(); iter.next() }
+        "GEOPOS"           => { iter.next(); iter.next() }
+        "GEORADIUS"        => { iter.next(); iter.next() }
+        "GEORADIUSBYMEMBER"=> { iter.next(); iter.next() }
+
+    // Proxy
+        "COMMAND"          => { Some("key0") }
+        "PING"             => { Some("key0") }
         _ => {
             error!("Unrecognized command: {}", first_word);
             None
