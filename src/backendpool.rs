@@ -4,7 +4,7 @@ use rustproxy::{StreamType, Subscriber};
 use rustproxy::{generate_backend_token, generate_client_token};
 use config::{Distribution, BackendPoolConfig};
 use backend::{Backend};
-use redisprotocol::{determine_modula_shard, extract_key};
+use redisprotocol::{determine_modula_shard, extract_key, extract_key2};
 
 use mio::*;
 use mio::tcp::{TcpListener, TcpStream};
@@ -132,7 +132,7 @@ impl BackendPool {
     // Based on the given command, determine which Backend to use, if any.
     // We support Ketama, Modula, and Random.
     pub fn shard(&mut self, command: &String) -> Option<&mut Backend> {
-        let key = extract_key(command).unwrap();
+        let key = extract_key2(command).unwrap();
         let tag = get_tag(key, &self.config.hash_tag);
 
         // TODO: Also, we want to cache the shardmap building if possible.
@@ -277,16 +277,11 @@ impl BackendPool {
                     let result = stream.read_to_string(&mut buf);
                     debug!("Read from client:\n{} ({})", buf, buf.len());
                     match result {
-                        Ok(size) => {
-                            debug!("Length: {}", size);
-                            if size == 0 {
-                                let _ = stream.read_to_string(&mut buf);
-                                debug!("Read again: {}", buf);
-                            }
+                        Ok(_) => {
                         }
                         Err(reason) => {
                             if buf.len() == 0 {
-                                error!("Error: {}, {}", reason, buf);
+                                error!("Useless Error?: {}, {}", reason, buf);
                             }
                         }
                     }
@@ -311,7 +306,7 @@ impl BackendPool {
         // Or it has its own.
         let success = {
             let backend = self.shard(&client_request).unwrap();
-            backend.write_message(client_request, client_token)
+            backend.write_message(&client_request, client_token)
         };
 
         if !success {
@@ -347,16 +342,16 @@ use cluster_backend::init_logging;
 #[test]
 fn test_hashtag() {
     init_logging();
-    assert_eq!(get_tag("/derr/der".to_string(), &"/".to_string()), "derr".to_string());
-    assert_eq!(get_tag("derr/der".to_string(), &"/".to_string()), "derr/der".to_string());
-    assert_eq!(get_tag("derr<der>".to_string(), &"<>".to_string()), "der".to_string());
-    assert_eq!(get_tag("der/r/der".to_string(), &"//".to_string()), "r".to_string());
-    assert_eq!(get_tag("dberadearb".to_string(), &"ab".to_string()), "dear".to_string());
+    assert_eq!(get_tag("/derr/der", &"/".to_string()), "derr".to_string());
+    assert_eq!(get_tag("derr/der", &"/".to_string()), "derr/der".to_string());
+    assert_eq!(get_tag("derr<der>", &"<>".to_string()), "der".to_string());
+    assert_eq!(get_tag("der/r/der", &"//".to_string()), "r".to_string());
+    assert_eq!(get_tag("dberadearb", &"ab".to_string()), "dear".to_string());
 }
 
-fn get_tag(command: String, tags: &String) -> String {
+fn get_tag<'a>(key: &'a str, tags: &String) -> &'a str {
     if tags.len() == 0 {
-        return command;
+        return key;
     }
     let ref mut chars = tags.chars();
     let a = chars.next().unwrap();
@@ -365,23 +360,22 @@ fn get_tag(command: String, tags: &String) -> String {
         None => a
     };
     let mut parsing_tag = false;
-    let mut output = String::new();
-    for cha in command.chars() {
+    let mut beginning = 0;
+    let mut index = 0;
+    for cha in key.chars() {
         if !parsing_tag && cha == a {
             parsing_tag = true;
-            continue;
+            beginning = index + 1;
         }
-        if parsing_tag && cha == b {
-            return output;
+        else if parsing_tag && cha == b {
+            return key.get(beginning..index).unwrap();
         }
-        if parsing_tag {
-            output.push(cha);
-            continue;
-        }
+        index += 1;
     }
-    return command;
+    return key;
 }
 
+// TODO: Rewrite this
 pub fn parse_redis_response(stream: &mut BufStream<TcpStream>) -> String {
     let mut string = String::new();
     let _ = stream.read_line(&mut string);
@@ -434,4 +428,20 @@ pub fn parse_redis_response(stream: &mut BufStream<TcpStream>) -> String {
         _ => {}
     }
     string
+}
+
+pub fn _parse_redis_response(stream: &mut BufStream<TcpStream>) -> &str {
+    let buf = stream.fill_buf().unwrap();
+    match buf.get(0).unwrap() {
+        // $
+        36u8 => {
+            // Find the end. parse the integer.
+            // Then parse X bytes from next end.
+            // Expect the end.
+        }
+        // *
+        42u8 => {}
+        _ => {}
+    };
+    ""
 }

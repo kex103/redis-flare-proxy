@@ -41,6 +41,23 @@ pub fn init_logging() {
         }
     };
 }
+#[cfg(test)]
+pub fn init_logging_info() {
+    let stdout = ConsoleAppender::builder().build();
+    let config = 
+            Config::builder()
+                .appender(Appender::builder().build("stdout", Box::new(stdout)))
+                .build(Root::builder().appender("stdout").build(LogLevelFilter::Info))
+                .unwrap();
+
+    match log4rs::init_config(config) {
+        Ok(_) => {},
+        Err(logger_error) => {
+            println!("Logging error: {:?}", logger_error);
+            return;
+        }
+    };
+}
 
 #[test]
 fn test_slotsmap() {
@@ -307,7 +324,7 @@ impl ClusterBackend {
 
     fn initialize_slotmap(&mut self, backend_token: Token) {
         let host = self.hosts.get_mut(&backend_token).unwrap();
-        host.write_message("*2\r\n$7\r\nCLUSTER\r\n$5\r\nSLOTS\r\n".to_owned(), NULL_TOKEN);
+        host.write_message("*2\r\n$7\r\nCLUSTER\r\n$5\r\nSLOTS\r\n", NULL_TOKEN);
         self.queue.push_back(host.queue.back().unwrap().clone());
     }
 
@@ -427,11 +444,11 @@ impl ClusterBackend {
     }
 
     pub fn write_message(&mut self,
-        message: String,
+        message: &str,
         client_token: Token
     ) -> bool {
         // get the predicted backend to write to.
-        let backend_token = self.get_shard(message.clone());
+        let backend_token = self.get_shard(message.to_string());
         debug!("Cluster Writing to {:?}. Source: {:?}", backend_token, client_token);
         let result = self.hosts.get_mut(&backend_token).unwrap().write_message(message, client_token);
         if result {

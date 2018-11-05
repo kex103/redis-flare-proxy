@@ -113,7 +113,7 @@ impl Backend {
     }
 
     pub fn write_message(&mut self,
-        message: String,
+        message: &str,
         client_token: Token
     ) -> bool {
         match self.single {
@@ -248,7 +248,7 @@ impl SingleBackend {
             request.push_str("\r\n");
             request.push_str(&self.config.auth);
             request.push_str("\r\n");
-            self.write_to_stream(NULL_TOKEN, request);
+            self.write_to_stream(NULL_TOKEN, &request);
             self.waiting_for_auth_resp = true;
             wait_for_resp = true;
         }
@@ -260,13 +260,13 @@ impl SingleBackend {
             request.push_str("\r\n");
             request.push_str(&self.config.db.to_string());
             request.push_str("\r\n");
-            self.write_to_stream(NULL_TOKEN, request);
+            self.write_to_stream(NULL_TOKEN, &request);
             self.waiting_for_db_resp = true;
             wait_for_resp = true;
         }
 
         if self.timeout != 0 {
-            self.write_to_stream(NULL_TOKEN, "PING\r\n".to_owned());
+            self.write_to_stream(NULL_TOKEN, "PING\r\n");
             self.waiting_for_ping_resp = true;
             wait_for_resp = true;
         }
@@ -322,7 +322,7 @@ impl SingleBackend {
         // Get rid of first queue.
         self.queue.pop_front();
 
-        self.write_to_client(head.0, "-ERR RustProxy timed out\r\n".to_owned());
+        self.write_to_client(head.0, "-ERR RustProxy timed out\r\n");
 
         if &target_timestamp == time {
             if self.failure_limit > 0 {
@@ -354,7 +354,7 @@ impl SingleBackend {
             match possible_token {
                 Some((NULL_TOKEN, _)) => {}
                 Some((client_token, _)) => {
-                    self.write_to_client(client_token, "-ERR: Unavailable backend.\r\n".to_owned());
+                    self.write_to_client(client_token, "-ERR: Unavailable backend.\r\n");
                 }
                 None => break,
             }
@@ -378,12 +378,12 @@ impl SingleBackend {
     }
 
     pub fn write_message(&mut self,
-        message: String,
+        message: &str,
         client_token: Token
     ) -> bool {
         match self.status {
             BackendStatus::READY => {
-                self.write_to_stream(client_token, message.clone());
+                self.write_to_stream(client_token, message);
                 true
             }
             _ => {
@@ -408,7 +408,7 @@ impl SingleBackend {
                 Some((client_token, _)) => client_token,
                 None => panic!("No more client token in backend queue, even though queue length was >0 just now!"),
             };
-            self.write_to_client(client_token, response.clone());
+            self.write_to_client(client_token, &response);
             if client_token == NULL_TOKEN {
                 self.handle_internal_response(response, &mut unhandled_internal_responses);
             }
@@ -514,14 +514,14 @@ impl SingleBackend {
         written_sockets.push_back((token, stream_type));
     }
 
-    fn write_to_client(&mut self, client_token: Token, message: String) {
+    fn write_to_client(&mut self, client_token: Token, message: &str) {
         if client_token == NULL_TOKEN {
             return;
         }
         match self.parent_clients().get_mut(&client_token) {
             Some(stream) => {
                 debug!("Wrote to client {:?}: {:?}", client_token, message);
-                let _ = stream.write(&message.into_bytes()[..]);
+                let _ = stream.write(&message.as_bytes());
                 self.register_written_socket(client_token, StreamType::PoolClient);
             }
             _ => panic!("Found listener instead of stream! for clienttoken {:?}", client_token),
@@ -531,12 +531,12 @@ impl SingleBackend {
     fn write_to_stream(
         &mut self,
         client_token: Token,
-        message: String,
+        message: &str,
     ) {
         debug!("Write to backend {:?} {}: {}", &self.token, self.host, &message);
         match self.socket {
             Some(ref mut socket) => {
-                let _ = socket.write(&message.clone().into_bytes()[..]);
+                let _ = socket.write(&message.as_bytes());
             }
             None => panic!("No connection to backend"),
         }
