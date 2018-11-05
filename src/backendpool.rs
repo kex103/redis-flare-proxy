@@ -8,12 +8,14 @@ use redisprotocol::{determine_modula_shard, extract_key};
 
 use mio::*;
 use mio::tcp::{TcpListener, TcpStream};
-use std::collections::{VecDeque, HashMap};
+use std::collections::{VecDeque};
 use std::string::String;
 use std::io::{Read, Write, BufRead};
 use std::time::{Instant};
 use bufstream::BufStream;
 
+use fxhash::FxHashMap as HashMap;
+use fxhash::FxHashMap;
 use conhash::*;
 use conhash::Node;
 
@@ -56,9 +58,9 @@ impl BackendPool {
             token: pool_token,
             config: config,
             backends: VecDeque::new(),
-            backend_map: HashMap::new(),
-            all_backend_tokens: HashMap::new(),
-            client_sockets: HashMap::new(),
+            backend_map: FxHashMap::default(),
+            all_backend_tokens: FxHashMap::default(),
+            client_sockets: FxHashMap::default(),
             listen_socket: None,
         }
     }

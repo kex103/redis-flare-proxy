@@ -5,7 +5,7 @@ use bufstream::BufStream;
 use mio::*;
 use mio_more::timer::{Timer, Builder};
 use mio::tcp::{TcpStream};
-use std::collections::{VecDeque, HashMap};
+use std::collections::{VecDeque};
 use std::string::String;
 use std::io::{Read, Write, BufRead};
 use std::time::Duration;
@@ -14,6 +14,8 @@ use std::cell::Cell;
 use std::cell::RefCell;
 use std::rc::Rc;
 use cluster_backend::{ClusterBackend};
+use fxhash::FxHashMap as HashMap;
+use fxhash::FxHashMap;
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum BackendStatus {

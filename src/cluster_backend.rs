@@ -2,7 +2,9 @@ use rustproxy::{BackendToken, PoolToken, ClientToken, generate_backend_token, St
 use backend::{BackendStatus, Host, SingleBackend};
 use backendpool::BackendPool;
 use config::BackendConfig;
-use std::collections::{VecDeque, HashMap};
+use std::collections::{VecDeque};
+use fxhash::FxHashMap as HashMap;
+use fxhash::FxHashMap;
 use crc16::*;
 use mio::{Token, Poll};
 use std::time::Instant;
@@ -224,10 +226,10 @@ impl ClusterBackend {
         pool: &mut BackendPool,
         written_sockets: &mut VecDeque<(Token, StreamType)>,
     ) -> (ClusterBackend, Vec<BackendToken>) {
-        let hosts = HashMap::new();
+        let hosts = FxHashMap::default();
         let mut cluster = ClusterBackend {
             hosts: hosts,
-            hostnames: HashMap::new(),
+            hostnames: FxHashMap::default(),
             slots: Vec::with_capacity(16384),
             config: config,
             status: BackendStatus::DISCONNECTED,

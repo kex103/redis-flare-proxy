@@ -15,6 +15,7 @@ extern crate conhash;
 extern crate rand;
 extern crate crc16;
 extern crate bufstream;
+extern crate fxhash;
 
 use log::LogLevelFilter;
 use log4rs::append::console::ConsoleAppender;

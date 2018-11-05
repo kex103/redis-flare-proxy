@@ -6,6 +6,8 @@ use mio::*;
 use bufstream::BufStream;
 use mio::tcp::{TcpListener, TcpStream};
 use std::collections::*;
+use fxhash::FxHashMap as HashMap;
+use fxhash::FxHashMap;
 use std::io::Write;
 use std::cell::Cell;
 
@@ -47,7 +49,7 @@ impl AdminPort {
         debug!("Registered admin socket.");
 
         AdminPort {
-            client_sockets: HashMap::new(),
+            client_sockets: FxHashMap::default(),
             socket: server_socket,
             config: config,
         }
