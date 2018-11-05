@@ -97,7 +97,7 @@ class BenchmarkRustProxy(unittest.TestCase):
             "-l ERROR"]
         env = os.environ.copy()
         env['RUST_BACKTRACE'] = '1'
-        process = subprocess.Popen(["cargo", "profiler", "callgrind", "--release", "--"] + args, stdout=log_out, stderr=subprocess.STDOUT, env=env)
+        process = subprocess.Popen(["cargo", "profiler", "callgrind", "--bin", "rustproxy", "--release", "--"] + args, stdout=log_out, stderr=subprocess.STDOUT, env=env)
         time.sleep(1);
         self.subprocesses.append(process)
         # Get the port name to remove.
@@ -141,10 +141,10 @@ class BenchmarkRustProxy(unittest.TestCase):
 
     def test_benchmark_single_backend_with_profiling(self):
         kill_redis_server(6380)
-        self.start_redis_server(6380)
+        proc = self.start_benchmarker(1531, 6380)
 
         self.start_rustproxy_with_profiling("/home/kxiao/rustproxy/tests/conf/timeout1.toml")
-        self.run_redis_benchmark(1531)
+        proc.wait()
 
     def test_benchmark_single_pool(self):
         kill_redis_server(6380)
