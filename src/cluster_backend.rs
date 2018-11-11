@@ -171,6 +171,7 @@ fn handle_slotsmap(
             // TODO. only do this for first one.
             let host = format!("{}:{}", hostname, port);
             handle_slots(host, starting_slot, ending_slot);
+            expect_eol(&mut chars);
         }
     }
 }
