@@ -17,7 +17,6 @@ use fxhash::FxHashMap;
 // For admin reqs.
 use backend::parse_redis_command;
 use toml;
-use std::process;
 
 pub const NULL_TOKEN: Token = Token(0);
 pub const SERVER: Token = Token(1);

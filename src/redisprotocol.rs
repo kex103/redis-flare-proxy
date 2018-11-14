@@ -1,9 +1,12 @@
-use std::collections::hash_map::DefaultHasher;
-use std::hash::Hasher;
-use std::hash::Hash;
 use std::result::Result;
 use std::error::Error;
 use std::fmt;
+use std;
+
+#[cfg(test)]
+use std::time::Instant;
+#[cfg(test)]
+use cluster_backend::init_logging_info;
 
 #[derive(Debug)]
 pub struct RedisProtocolError {}
@@ -21,12 +24,6 @@ impl Error for RedisProtocolError {
         None
     }
 }
-
-pub fn determine_modula_shard(key: &str, count: usize) -> Result<usize, RedisProtocolError> {
-    Ok(hash(key) % count)
-}
-
-use std;
 
 pub fn extract_key3(command: &String) -> Result<&str, RedisProtocolError> {
     let mut seen_space = 0;
@@ -935,49 +932,6 @@ fn supported_keys(command: &str) -> bool {
     }
 }
 
-pub fn hash(key: &str) -> usize {
-    //debug!("Hashing: {}", key);
-    //let mut hasher = DefaultHasher::new();
-    //key.hash(&mut hasher);
-    //hasher.finish() as usize
-
-
-    let mut hasher = FnvHasher::default();
-    hasher.write(key.as_bytes());
-    hasher.finish() as usize
-}
-
-
-#[cfg(test)]
-use std::time::Instant;
-#[cfg(test)]
-use cluster_backend::init_logging;
-#[cfg(test)]
-use cluster_backend::init_logging_info;
-
-
-#[test]
-fn test_hashing_speed() {
-    init_logging();
-    let a = "key1".to_string();
-    // Using this test function to test how fast hashing can be.
-    let start = Instant::now();
-    for _ in 1..2000000 {
-        hash(&a);
-    }
-    info!("Time spent with default: {:?}", Instant::now() - start);
-    let start = Instant::now();
-    for _ in 1..2000000 {
-        fnv1a(a.clone());
-    }
-    info!("Time spent with fnv1a: {:?}", Instant::now() - start);
-    let start = Instant::now();
-    for _ in 1..2000000 {
-        fnv1a2(a.clone());
-    }
-    info!("Time spent with fnv1a2: {:?}", Instant::now() - start);
-}
-
 #[test]
 fn test_parsing_speed() {
     let num_runs = 10000000;
@@ -1005,74 +959,3 @@ fn test_parsing_speed() {
     }
     info!("Time spent with extract_key2: {:?}", Instant::now() - start);
 }
-
-
-use std::default::Default;
-use std::hash::{BuildHasherDefault};
-use std::collections::{HashMap, HashSet};
-
-fn fnv1a(bytes: String) -> usize {
-    let mut hasher = FnvHasher::default();
-    hasher.write(bytes.as_bytes());
-    hasher.finish() as usize
-}
-
-fn fnv1a2(key: String) -> usize {
-    let mut hash = 0xcbf29ce484222325;
-    for byte in key.as_bytes().iter() {
-        hash = hash ^ (*byte as u64);
-        hash = hash.wrapping_mul(0x100000001b3);
-    }
-    hash as usize
-}
-
-/// An implementation of the Fowler–Noll–Vo hash function.
-///
-/// See the [crate documentation](index.html) for more details.
-#[allow(missing_copy_implementations)]
-pub struct FnvHasher(u64);
-
-impl Default for FnvHasher {
-
-    #[inline]
-    fn default() -> FnvHasher {
-        FnvHasher(0xcbf29ce484222325)
-    }
-}
-
-impl FnvHasher {
-    /// Create an FNV hasher starting with a state corresponding
-    /// to the hash `key`.
-    #[inline]
-    pub fn with_key(key: u64) -> FnvHasher {
-        FnvHasher(key)
-    }
-}
-
-impl Hasher for FnvHasher {
-    #[inline]
-    fn finish(&self) -> u64 {
-        self.0
-    }
-
-    #[inline]
-    fn write(&mut self, bytes: &[u8]) {
-        let FnvHasher(mut hash) = *self;
-
-        for byte in bytes.iter() {
-            hash = hash ^ (*byte as u64);
-            hash = hash.wrapping_mul(0x100000001b3);
-        }
-
-        *self = FnvHasher(hash);
-    }
-}
-
-/// A builder for default FNV hashers.
-pub type FnvBuildHasher = BuildHasherDefault<FnvHasher>;
-
-/// A `HashMap` using a default FNV hasher.
-pub type FnvHashMap<K, V> = HashMap<K, V, FnvBuildHasher>;
-
-/// A `HashSet` using a default FNV hasher.
-pub type FnvHashSet<T> = HashSet<T, FnvBuildHasher>;

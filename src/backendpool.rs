@@ -1,10 +1,11 @@
+use hash::hash;
 use rustproxy::BackendToken;
 use rustproxy::PoolToken;
 use rustproxy::{StreamType, Subscriber};
 use rustproxy::{generate_backend_token, generate_client_token};
 use config::{Distribution, BackendPoolConfig};
 use backend::{Backend};
-use redisprotocol::{determine_modula_shard, extract_key, extract_key2};
+use redisprotocol::{extract_key, extract_key2};
 
 use mio::*;
 use mio::tcp::{TcpListener, TcpStream};
@@ -162,7 +163,7 @@ impl BackendPool {
         }
 
         let shard = match self.config.distribution {
-            Distribution::Modula => determine_modula_shard(&tag, total_weight), // Should be using key, not command.
+            Distribution::Modula => Ok(hash(&self.config.hash_function, &tag) % total_weight), // Should be using key, not command.
             Distribution::Random => Ok(thread_rng().gen_range(0, total_weight - 1)),
             _ => panic!("Impossible to hit this with ketama!"),
         };

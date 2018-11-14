@@ -1,17 +1,100 @@
-# Rustproxy
+Rustproxy
+==============
 
-A lightweight redis proxy with features suited for redis cluster management, and a focus on performance.
+A fast, lightweight redis proxy with support for Redis Cluster. This enables you to horizontally scale up your redis usage safely, easily, and without downtime.
 
-Features:
+Rustproxy supports the redis protocol, and can be dropped in between an existing client/server without any changes.
+
+Performance
+==============
+
+Rustproxy 0.0.1  
+Twemproxy 4.4.
+Redis-cluster 
+(base comparison of redis)
+
+Benchmarker can be built with the --benchmarker target.
+
+Features
+==============
+
+- Redis cluster support
 - Hot config swapping
 - Efficient host blackout/backoff logic
-- Durable deletes (TODO)
+- Fast performance
+- Multiple server pools
+- Pipelined requests/responses
+- Consistent hashing option
+- Stats monitoring
 
-# Architecture
+Compatible with traffic that points to a redis server.
+Easy to setup, and easy to switch over from a traditional redis setup without any service outage or data inconsistency!
+
+# Requirements
+- Requirements to build... OR use an existing package!
+- Install rust.
+
+# How to build
+- Use cargo build --release or --debug.
+
+# Packages
+
+# Installation
+With cargo: cargo install rustproxy
+
+Or download binary: 
+
+- Download package
+
+# Getting started
+
+- Look at guide.
+
+# Upgrading from an existing redis usage
+- Upgrade your redis setup without any downtime or updating your clients!
+- See guide here.
+
+# Benchmarking comparison
+
+Compare with base redis?
+Compare with twemproxy?
+Compare with redis cluster?
+
+
+
+# Want to upgrade?
+Pro and Enterprise versions?
+
+# Issues?
+Report them here.
+
+# License
+
+LGPL3
+
+# Author
+- Written by Kevin Xiao.
+
+
+==== Differentiaton:
+Free: Twemproxy + cluster.
+Pro: hot reload. Stats/metrics? consistent hashing. authentication. select db?
+Enterprise: Cloud cluster. Migration tools? Convert twemproxy config to proxy config.
+
+
+======
+Landing page
+
+1. Headline: "Scale up your redis usage. No downtime. No performance loss. No data loss. No pain."
+2. Call to Action: "Sign up for blah, blah now" for interested visitors. Cold visitors, can click on "Take a look at how to upgrade an existing setup."
+
+
+
+## Random notes
+
+# Architecture?
 - Rustproxy uses mio, which introduces a Poll-and-Token event system.
-- 
 
-# Using the benchmarker
 
 # Features
 1. Sharding

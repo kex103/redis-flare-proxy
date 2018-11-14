@@ -16,6 +16,9 @@ extern crate rand;
 extern crate crc16;
 extern crate bufstream;
 extern crate fxhash;
+extern crate crc;
+extern crate fasthash;
+extern crate hashers;
 
 use log::LogLevelFilter;
 use log4rs::append::console::ConsoleAppender;
@@ -30,6 +33,7 @@ mod backend;
 mod cluster_backend;
 mod backendpool;
 mod redisprotocol;
+mod hash;
 
 /*
 Entrypoint for rustproxy.

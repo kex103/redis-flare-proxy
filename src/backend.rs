@@ -15,7 +15,6 @@ use std::cell::RefCell;
 use std::rc::Rc;
 use cluster_backend::{ClusterBackend};
 use fxhash::FxHashMap as HashMap;
-use fxhash::FxHashMap;
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum BackendStatus {

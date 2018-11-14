@@ -2,6 +2,7 @@ use std::collections::BTreeMap;
 use toml;
 use std::fs::File;
 use std::io::{Read};
+use hash::HashFunction;
 
 #[derive(Deserialize, Clone, Serialize, Eq, PartialEq, Hash)]
 pub enum Distribution {
@@ -15,12 +16,28 @@ pub struct RustProxyConfig {
     pub admin: AdminConfig,
     pub pools: BTreeMap<String, BackendPoolConfig>,
 }
+/*
+one_at_a_time
+md5
+crc16
+crc32 (crc32 implementation compatible with libmemcached)
+crc32a (correct crc32 implementation as per the spec)
+fnv1_64
+fnv1a_64
+fnv1_32
+fnv1a_32
+hsieh
+murmur
+jenkins*/
 
 fn default_retry_timeout() -> usize {
     return 1000;
 }
 fn default_distribution() -> Distribution {
     return Distribution::Modula;
+}
+fn default_hash_function() -> HashFunction {
+    return HashFunction::Fnv1a64;
 }
 
 #[derive(Deserialize, Clone, Serialize, Eq, PartialEq, Hash)]
@@ -43,6 +60,9 @@ pub struct BackendPoolConfig {
 
     #[serde(default = "default_distribution")]
     pub distribution: Distribution,
+
+    #[serde(default = "default_hash_function")]
+    pub hash_function: HashFunction,
 
     #[serde(default)]
     pub hash_tag: String,

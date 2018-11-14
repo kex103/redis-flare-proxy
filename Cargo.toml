@@ -19,6 +19,10 @@ rand = "0.3"
 crc16 = "0.3.3"
 bufstream = "0.1"
 fxhash = "*"
+crc = "^1.0.0"
+gcc = "*"
+fasthash = "0.3.1"
+hashers = "1.0.1"
 
 [dev-dependencies]
 redis = "0.5.3"
