@@ -5,7 +5,7 @@ use rustproxy::{StreamType, Subscriber};
 use rustproxy::{generate_backend_token, generate_client_token};
 use config::{Distribution, BackendPoolConfig};
 use backend::{Backend};
-use redisprotocol::{extract_key, extract_key2};
+use redisprotocol::{extract_key};
 
 use mio::*;
 use mio::tcp::{TcpListener, TcpStream};
@@ -133,7 +133,7 @@ impl BackendPool {
     // Based on the given command, determine which Backend to use, if any.
     // We support Ketama, Modula, and Random.
     pub fn shard(&mut self, command: &String) -> Option<&mut Backend> {
-        let key = extract_key2(command).unwrap();
+        let key = extract_key(command).unwrap();
         let tag = get_tag(key, &self.config.hash_tag);
 
         // TODO: Also, we want to cache the shardmap building if possible.
@@ -162,7 +162,7 @@ impl BackendPool {
             }
         }
 
-        let shard = match self.config.distribution {
+        let shard: Result<usize, String> = match self.config.distribution {
             Distribution::Modula => Ok(hash(&self.config.hash_function, &tag) % total_weight), // Should be using key, not command.
             Distribution::Random => Ok(thread_rng().gen_range(0, total_weight - 1)),
             _ => panic!("Impossible to hit this with ketama!"),

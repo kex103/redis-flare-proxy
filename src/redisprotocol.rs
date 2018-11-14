@@ -25,7 +25,7 @@ impl Error for RedisProtocolError {
     }
 }
 
-pub fn extract_key3(command: &String) -> Result<&str, RedisProtocolError> {
+pub fn extract_key(command: &String) -> Result<&str, RedisProtocolError> {
     let mut seen_space = 0;
     let mut parsed_command = false;
 
@@ -47,7 +47,7 @@ pub fn extract_key3(command: &String) -> Result<&str, RedisProtocolError> {
                     bytes.get_unchecked(first_index..index-1)
                 };
                 debug!("First word: {:?}", first_word2);
-                if supported_keys3(first_word2) {
+                if supported_keys(first_word2) {
                     seen_space = 1;
                     first_index = 0;
                     parsed_command = true;
@@ -68,50 +68,7 @@ pub fn extract_key3(command: &String) -> Result<&str, RedisProtocolError> {
     return Err(RedisProtocolError {});
 }
 
-pub fn extract_key2(command: &String) -> Result<&str, RedisProtocolError> {
-    let mut seen_space = 0;
-    let mut parsed_command = false;
-
-    let bytes = command.as_bytes();
-    let mut first_index = 0;
-    let mut index = 0;
-    for &b in bytes {
-        debug!("{:?}", b);
-        // space U+0020
-        // line ending U+0010
-        if b.eq(&10u8) {
-            if seen_space < 1 {
-                seen_space += 1;
-            } else if first_index == 0 {
-                debug!("Starting to record");
-                first_index = index + 1;
-            } else if parsed_command == false {
-                let first_word2 = unsafe {
-                    bytes.get_unchecked(first_index..index-1)
-                };
-                debug!("First word: {:?}", first_word2);
-                if supported_keys3(first_word2) {
-                    seen_space = 1;
-                    first_index = 0;
-                    parsed_command = true;
-                } else {
-                    return Err(RedisProtocolError {});
-                }
-            } else if parsed_command == true {
-                let body = unsafe {
-                    std::str::from_utf8_unchecked(bytes.get_unchecked(first_index..index-1))
-                };
-                debug!("Key: {:?}", body);
-                return Ok(body);
-            }
-        }
-        index += 1;
-    }
-
-    return Err(RedisProtocolError {});
-}
-
-fn supported_keys3(command: &[u8]) -> bool {
+fn supported_keys(command: &[u8]) -> bool {
     match command.len() {
         3 => {
             if str3compare2(command, &0x67u8, &0x65u8, &0x74u8) { return true; }
@@ -396,6 +353,7 @@ fn str9compare(byte: &[u8], c1: char, c2: char, c3: char, c4: char, c5: char, c6
     }
 }
 
+#[allow(dead_code)]
 fn str10compare(byte: &[u8], c1: char, c2: char, c3: char, c4: char, c5: char, c6: char, c7: char, c8: char, c9: char, c10: char) -> bool {
     let c1 = &(c1 as u8);
     let c2 = &(c2 as u8);
@@ -652,286 +610,6 @@ fn str17compare(byte: &[u8], c1: char, c2: char, c3: char, c4: char, c5: char, c
     }
 }
 
-pub fn extract_key(command: &String) -> Result<String, RedisProtocolError> {
-    let mut iter = command.split_whitespace();
-    iter.next();
-    iter.next();
-    let first_word = match iter.next() {
-        Some(first_word) => first_word,
-        None => "",
-    };
-
-    debug!("First word: {}", first_word);
-    let maybe_key = match first_word.to_uppercase().as_str() {
-    // Keys
-        "DEL"              => { iter.next(); iter.next() }
-        "DUMP"             => { iter.next(); iter.next() }
-        "EXISTS"           => { iter.next(); iter.next() }
-        "EXPIRE"           => { iter.next(); iter.next() }
-        "EXPIREAT"         => { iter.next(); iter.next() }
-        "PERSIST"          => { iter.next(); iter.next() }
-        "PEXPIRE"          => { iter.next(); iter.next() }
-        "PEXPIREAT"        => { iter.next(); iter.next() }
-        "PTTL"             => { iter.next(); iter.next() }
-        "RESTORE"          => { iter.next(); iter.next() }
-        "SORT"             => { iter.next(); iter.next() }
-        "TOUCH"            => { iter.next(); iter.next() }
-        "TTL"              => { iter.next(); iter.next() }
-        "TYPE"             => { iter.next(); iter.next() }
-        "UNLINK"           => { iter.next(); iter.next() }
-    // Strings
-        "APPEND"           => { iter.next(); iter.next() }
-        "BITFIELD"         => { iter.next(); iter.next() }
-        "BITCOUNT"         => { iter.next(); iter.next() }
-        "BITPOS"           => { iter.next(); iter.next() }
-        "DECR"             => { iter.next(); iter.next() }
-        "DECRBY"           => { iter.next(); iter.next() }
-        "GET"              => { iter.next(); iter.next() }
-        "GETBIT"           => { iter.next(); iter.next() }
-        "GETRANGE"         => { iter.next(); iter.next() }
-        "GETSET"           => { iter.next(); iter.next() }
-        "INCR"             => { iter.next(); iter.next() }
-        "INCRBY"           => { iter.next(); iter.next() }
-        "INCRBYFLOAT"      => { iter.next(); iter.next() }
-        "PSETEX"           => { iter.next(); iter.next() }
-        "SET"              => { iter.next(); iter.next() }
-        "SETBIT"           => { iter.next(); iter.next() }
-        "SETEX"            => { iter.next(); iter.next() }
-        "SETNX"            => { iter.next(); iter.next() }
-        "SETRANGE"         => { iter.next(); iter.next() }
-        "STRLEN"           => { iter.next(); iter.next() }
-    // Hashes
-        "HDEL"             => { iter.next(); iter.next() }
-        "HEXISTS"          => { iter.next(); iter.next() }
-        "HGET"             => { iter.next(); iter.next() }
-        "HGETALL"          => { iter.next(); iter.next() }
-        "HINCRBY"          => { iter.next(); iter.next() }
-        "HINCRBYFLOAT"     => { iter.next(); iter.next() }
-        "HKEYS"            => { iter.next(); iter.next() }
-        "HLEN"             => { iter.next(); iter.next() }
-        "HMGET"            => { iter.next(); iter.next() }
-        "HMSET"            => { iter.next(); iter.next() }
-        "HSCAN"            => { iter.next(); iter.next() }
-        "HSET"             => { iter.next(); iter.next() }
-        "HSETNX"           => { iter.next(); iter.next() }
-        "HSTRLEN"          => { iter.next(); iter.next() }
-        "HVALS"            => { iter.next(); iter.next() }
-    // Lists
-        "BLPOP"            => { iter.next(); iter.next() }
-        "BRPOP"            => { iter.next(); iter.next() }
-        //"BRPOPLPUSH"
-        "LINDEX"           => { iter.next(); iter.next() }
-        "LINSERT"          => { iter.next(); iter.next() }
-        "LLEN"             => { iter.next(); iter.next() }
-        "LPOP"             => { iter.next(); iter.next() }
-        "LPUSH"            => { iter.next(); iter.next() }
-        "LPUSHX"           => { iter.next(); iter.next() }
-        "LRANGE"           => { iter.next(); iter.next() }
-        "LREM"             => { iter.next(); iter.next() }
-        "LSET"             => { iter.next(); iter.next() }
-        "LTRIM"            => { iter.next(); iter.next() }
-        "RPOP"             => { iter.next(); iter.next() }
-        //"RPOPLPUSH"
-        "RPUSH"            => { iter.next(); iter.next() }
-        "RPUSHX"           => { iter.next(); iter.next() }
-    // Sets
-        "SADD"             => { iter.next(); iter.next() }
-        "SCARD"            => { iter.next(); iter.next() }
-        //"SDIFF"
-        //"SDIFFSTORE"
-        //"SINTER"
-        //"SINTERSTORE"
-        "SISMEMBER"        => { iter.next(); iter.next() }
-        "SMEMBERS"         => { iter.next(); iter.next() }
-        //"SMOVE"            => { iter.next(); iter.next() }
-        "SPOP"             => { iter.next(); iter.next() }
-        "SRANDMEMBER"      => { iter.next(); iter.next() }
-        "SREM"             => { iter.next(); iter.next() }
-        "SSCAN"            => { iter.next(); iter.next() }
-        //"SUNION
-        //"SUNIONSTORE"
-    // Sorted sets
-        "BZPOPMAX"         => { iter.next(); iter.next() }
-        "BZPOPMIN"         => { iter.next(); iter.next() }
-        "ZADD"             => { iter.next(); iter.next() }
-        "ZCARD"            => { iter.next(); iter.next() }
-        "ZCOUNT"           => { iter.next(); iter.next() }
-        "ZINCRBY"          => { iter.next(); iter.next() }
-        //"ZINTERSTORE"
-        "ZLEXCOUNT"        => { iter.next(); iter.next() }
-        "ZPOPMAX"          => { iter.next(); iter.next() }
-        "ZPOPMIN"          => { iter.next(); iter.next() }
-        "ZRANGE"           => { iter.next(); iter.next() }
-        "ZRANGEBYLEX"      => { iter.next(); iter.next() }
-        "ZRANGEBYSCORE"    => { iter.next(); iter.next() }
-        "ZRANK"            => { iter.next(); iter.next() }
-        "ZREM"             => { iter.next(); iter.next() }
-        "ZREMRANGEBYLEX"   => { iter.next(); iter.next() }
-        "ZREMRANGEBYRANK"  => { iter.next(); iter.next() }
-        "ZREMRANGEBYSCORE" => { iter.next(); iter.next() }
-        "ZREVRANGE"        => { iter.next(); iter.next() }
-        "ZREVRANGEBYLEX"   => { iter.next(); iter.next() }
-        "ZREVRANGEBYSCORE" => { iter.next(); iter.next() }
-        "ZREVRANK"         => { iter.next(); iter.next() }
-        "ZSCAN"            => { iter.next(); iter.next() }
-        "ZSCORE"           => { iter.next(); iter.next() }
-        //"ZUNIONSTORE"
-    // Hyperloglog
-        "PFADD"            => { iter.next(); iter.next() }
-        "PFCOUNT"          => { iter.next(); iter.next() }
-        //"PFMERGE"
-    // Geo
-        "GEOADD"           => { iter.next(); iter.next() }
-        "GEODIST"          => { iter.next(); iter.next() }
-        "GEOHASH"          => { iter.next(); iter.next() }
-        "GEOPOS"           => { iter.next(); iter.next() }
-        "GEORADIUS"        => { iter.next(); iter.next() }
-        "GEORADIUSBYMEMBER"=> { iter.next(); iter.next() }
-
-    // Proxy
-        "COMMAND"          => { Some("key0") }
-        "PING"             => { Some("key0") }
-        _ => {
-            error!("Unrecognized command: {}", first_word);
-            None
-        }
-    };
-    match maybe_key {
-        Some(key) => Ok(key.to_string()),
-        None => Err(RedisProtocolError {}),
-    }
-}
-
-fn supported_keys(command: &str) -> bool {
-    match command {
-    // Keys
-        "DEL"              => true,
-        "DUMP"             => true,
-        "EXISTS"           => true,
-        "EXPIRE"           => true,
-        "EXPIREAT"         => true,
-        "PERSIST"          => true,
-        "PEXPIRE"          => true,
-        "PEXPIREAT"        => true,
-        "PTTL"             => true,
-        "RESTORE"          => true,
-        "SORT"             => true,
-        "TOUCH"            => true,
-        "TTL"              => true,
-        "TYPE"             => true,
-        "UNLINK"           => true,
-    // Strings
-        "APPEND"           => true,
-        "BITFIELD"         => true,
-        "BITCOUNT"         => true,
-        "BITPOS"           => true,
-        "DECR"             => true,
-        "DECRBY"           => true,
-        "GET"              => true,
-        "GETBIT"           => true,
-        "GETRANGE"         => true,
-        "GETSET"           => true,
-        "INCR"             => true,
-        "INCRBY"           => true,
-        "INCRBYFLOAT"      => true,
-        "PSETEX"           => true,
-        "SET"              => true,
-        "SETBIT"           => true,
-        "SETEX"            => true,
-        "SETNX"            => true,
-        "SETRANGE"         => true,
-        "STRLEN"           => true,
-    // Hashes
-        "HDEL"             => true,
-        "HEXISTS"          => true,
-        "HGET"             => true,
-        "HGETALL"          => true,
-        "HINCRBY"          => true,
-        "HINCRBYFLOAT"     => true,
-        "HKEYS"            => true,
-        "HLEN"             => true,
-        "HMGET"            => true,
-        "HMSET"            => true,
-        "HSCAN"            => true,
-        "HSET"             => true,
-        "HSETNX"           => true,
-        "HSTRLEN"          => true,
-        "HVALS"            => true,
-    // Lists
-        "BLPOP"            => true,
-        "BRPOP"            => true,
-        //"BRPOPLPUSH"
-        "LINDEX"           => true,
-        "LINSERT"          => true,
-        "LLEN"             => true,
-        "LPOP"             => true,
-        "LPUSH"            => true,
-        "LPUSHX"           => true,
-        "LRANGE"           => true,
-        "LREM"             => true,
-        "LSET"             => true,
-        "LTRIM"            => true,
-        "RPOP"             => true,
-        //"RPOPLPUSH"
-        "RPUSH"            => true,
-        "RPUSHX"           => true,
-    // Sets
-        "SADD"             => true,
-        "SCARD"            => true,
-        //"SDIFF"
-        //"SDIFFSTORE"
-        //"SINTER"
-        //"SINTERSTORE"
-        "SISMEMBER"        => true,
-        "SMEMBERS"         => true,
-        //"SMOVE"            => true,
-        "SPOP"             => true,
-        "SRANDMEMBER"      => true,
-        "SREM"             => true,
-        "SSCAN"            => true,
-        //"SUNION
-        //"SUNIONSTORE"
-    // Sorted sets
-        "BZPOPMAX"         => true,
-        "BZPOPMIN"         => true,
-        "ZADD"             => true,
-        "ZCARD"            => true,
-        "ZCOUNT"           => true,
-        "ZINCRBY"          => true,
-        //"ZINTERSTORE"
-        "ZLEXCOUNT"        => true,
-        "ZPOPMAX"          => true,
-        "ZPOPMIN"          => true,
-        "ZRANGE"           => true,
-        "ZRANGEBYLEX"      => true,
-        "ZRANGEBYSCORE"    => true,
-        "ZRANK"            => true,
-        "ZREM"             => true,
-        "ZREMRANGEBYLEX"   => true,
-        "ZREMRANGEBYRANK"  => true,
-        "ZREMRANGEBYSCORE" => true,
-        "ZREVRANGE"        => true,
-        "ZREVRANGEBYLEX"   => true,
-        "ZREVRANGEBYSCORE" => true,
-        "ZREVRANK"         => true,
-        "ZSCAN"            => true,
-        "ZSCORE"           => true,
-        //"ZUNIONSTORE"
-    // Hyperloglog
-        "PFADD"            => true,
-        "PFCOUNT"          => true,
-        //"PFMERGE"
-    // Geo
-        "GEOADD"           => true,
-        "GEODIST"          => true,
-        "GEOHASH"          => true,
-        "GEOPOS"           => true,
-        "GEORADIUS"        => true,
-        "GEORADIUSBYMEMBER"=> true,
-        _ => false,
-    }
-}
-
 #[test]
 fn test_parsing_speed() {
     let num_runs = 10000000;
@@ -943,19 +621,4 @@ fn test_parsing_speed() {
         let _ = extract_key(&a);
     }
     info!("Time spent with default: {:?}", Instant::now() - start);
-    let start = Instant::now();
-    for _ in 1..num_runs {
-        let _ = extract_key2(&a);
-    }
-    info!("Time spent with extract_key2: {:?}", Instant::now() - start);
-    let start = Instant::now();
-    for _ in 1..num_runs {
-        let _ = extract_key3(&a);
-    }
-    info!("Time spent with extract_key3: {:?}", Instant::now() - start);
-    let start = Instant::now();
-    for _ in 1..num_runs {
-        let _ = extract_key2(&a);
-    }
-    info!("Time spent with extract_key2: {:?}", Instant::now() - start);
 }
