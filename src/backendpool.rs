@@ -1,8 +1,8 @@
 use hash::hash;
-use rustproxy::BackendToken;
-use rustproxy::PoolToken;
-use rustproxy::{StreamType, Subscriber};
-use rustproxy::{generate_backend_token, generate_client_token};
+use redflareproxy::BackendToken;
+use redflareproxy::PoolToken;
+use redflareproxy::{StreamType, Subscriber};
+use redflareproxy::{generate_backend_token, generate_client_token};
 use config::{Distribution, BackendPoolConfig};
 use backend::{Backend};
 use redisprotocol::{extract_key};
@@ -296,7 +296,7 @@ impl BackendPool {
         // 1b. Handle client closing if it was just an empty message.
         if client_request.len() == 0 {
             self.client_sockets.remove(&client_token);
-            // TODO: Clean up references to client token in rustproxy?
+            // TODO: Clean up references to client token in redflareproxy?
             info!("Closing client socket");
             return;
         }

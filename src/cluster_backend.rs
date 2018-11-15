@@ -1,4 +1,4 @@
-use rustproxy::{BackendToken, PoolToken, ClientToken, generate_backend_token, StreamType, NULL_TOKEN, Subscriber};
+use redflareproxy::{BackendToken, PoolToken, ClientToken, generate_backend_token, StreamType, NULL_TOKEN, Subscriber};
 use backend::{BackendStatus, Host, SingleBackend};
 use backendpool::BackendPool;
 use config::BackendConfig;

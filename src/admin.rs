@@ -1,5 +1,5 @@
-use rustproxy::{StreamType, Subscriber, SOCKET_INDEX_SHIFT, SERVER};
-use rustproxy::{ClientToken};
+use redflareproxy::{StreamType, Subscriber, SOCKET_INDEX_SHIFT, SERVER};
+use redflareproxy::{ClientToken};
 use config::{AdminConfig};
 
 use mio::*;

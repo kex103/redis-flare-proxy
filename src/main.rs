@@ -27,7 +27,7 @@ use log4rs::encode::pattern::PatternEncoder;
 use log4rs::config::{Appender, Config, Root};
 
 mod admin;
-mod rustproxy;
+mod redflareproxy;
 mod config;
 mod backend;
 mod cluster_backend;
@@ -36,11 +36,11 @@ mod redisprotocol;
 mod hash;
 
 /*
-Entrypoint for rustproxy.
+Entrypoint for redflareproxy.
 */
 fn main() {
     // Take in args.
-    let matches = App::new("RustProxy")
+    let matches = App::new("RedFlareProxy")
                     .version("0.1")
                     .author("Kevin X. <xiaok10003@gmail.com>")
                     .about("Fast, light-weight redis proxy")
@@ -113,7 +113,7 @@ fn main() {
     // Start proxy.
     debug!("Starting up");
 
-    let mut rustproxy = rustproxy::RustProxy::new(config_path.to_owned()).unwrap();
-    rustproxy.run();
+    let mut redflareproxy = redflareproxy::RedFlareProxy::new(config_path.to_owned()).unwrap();
+    redflareproxy.run();
     debug!("Finished.");
 }

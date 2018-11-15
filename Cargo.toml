@@ -1,5 +1,5 @@
 [package]
-name = "rustproxy"
+name = "redflareproxy"
 version = "0.1.0"
 authors = ["Kevin Xiao <xiaok10003@gmail.com>"]
 
@@ -29,9 +29,9 @@ redis = "0.5.3"
 time = "0.1"
 
 [[bin]]
-name = "rustproxy"
+name = "redflareproxy"
 path = "src/main.rs"
 
 [[bin]]
-name = "rustproxy-benchmark"
+name = "redflare-benchmark"
 path = "src/benchmark/main.rs"

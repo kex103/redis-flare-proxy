@@ -1,7 +1,7 @@
 use backend::timeout_to_backend_token;
 use std::time::Instant;
 use admin;
-use config::{RustProxyConfig, BackendPoolConfig, load_config};
+use config::{RedFlareProxyConfig, BackendPoolConfig, load_config};
 use backendpool;
 use backendpool::BackendPool;
 use mio::*;
@@ -62,14 +62,14 @@ pub fn generate_client_token(next_socket_index: &Cell<usize>) -> ClientToken {
     new_token
 }
 
-// High-level struct that contains everything for a rustproxy instance.
-pub struct RustProxy {
-    // This may just get integrated back into RustProxy.
+// High-level struct that contains everything for a redflareproxy instance.
+pub struct RedFlareProxy {
+    // This may just get integrated back into RedFlareProxy.
     pub admin: admin::AdminPort,
 
     // Configs
-    pub config: RustProxyConfig,
-    pub staged_config: Option<RustProxyConfig>,
+    pub config: RedFlareProxyConfig,
+    pub staged_config: Option<RedFlareProxyConfig>,
 
     // Child structs.
     pub backendpools: FxHashMap<PoolToken, BackendPool>,
@@ -83,8 +83,8 @@ pub struct RustProxy {
     next_socket_index: Rc<Cell<usize>>,
     running: bool,
 }
-impl RustProxy {
-    pub fn new(config_path: String) -> Result<RustProxy, String> {
+impl RedFlareProxy {
+    pub fn new(config_path: String) -> Result<RedFlareProxy, String> {
         let config = try!(load_config(config_path));
         let poll = match Poll::new() {
             Ok(poll) => Rc::new(RefCell::new(poll)),
@@ -95,7 +95,7 @@ impl RustProxy {
         let subscribers = Rc::new(RefCell::new(FxHashMap::default()));
         let admin = admin::AdminPort::new(config.admin.clone(), &poll.borrow(), &mut subscribers.borrow_mut());
 
-        let mut rustproxy = RustProxy {
+        let mut redflareproxy = RedFlareProxy {
             admin: admin,
             next_socket_index: Rc::new(Cell::new(FIRST_SOCKET_INDEX)),
             //backendpools: FxHashMap::with_capacity(config.pools.len()),
@@ -110,13 +110,13 @@ impl RustProxy {
             running: true,
         };
         // Populate backend pools.
-        let pools_config = rustproxy.config.pools.clone();
+        let pools_config = redflareproxy.config.pools.clone();
         for (pool_name, pool_config) in pools_config {
-            rustproxy.init_backend_pool(&pool_name, &pool_config);
+            redflareproxy.init_backend_pool(&pool_name, &pool_config);
         }
-        debug!("Initialized rustproxy");
+        debug!("Initialized redflareproxy");
 
-        Ok(rustproxy)
+        Ok(redflareproxy)
     }
 
     pub fn switch_config(&mut self) -> Result<(), String> {
@@ -409,11 +409,11 @@ impl RustProxy {
         Ok(())
     }
 
-    pub fn get_current_config(&self) -> RustProxyConfig {
+    pub fn get_current_config(&self) -> RedFlareProxyConfig {
         self.config.clone()
     }
     
-    pub fn get_staged_config(&self) -> Option<RustProxyConfig> {
+    pub fn get_staged_config(&self) -> Option<RedFlareProxyConfig> {
         self.staged_config.clone()
     }
 
@@ -472,7 +472,7 @@ impl RustProxy {
                 // TODO: Need to lose reference to the stream, OR
                 // best is to orphan it. and respond OK.
                 switching_config = true;
-                // need to respond to socket later.switch_config(rustproxy
+                // need to respond to socket later.switch_config(redflareproxy
                 "OK".to_owned()
             }
             Some(unknown_command) => {

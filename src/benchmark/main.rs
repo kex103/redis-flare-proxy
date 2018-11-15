@@ -10,7 +10,7 @@ extern crate bufstream;
 
 mod proxy_benchmarker;
 fn main() {
-    let matches = App::new("RustProxy Benchmarking Tool")
+    let matches = App::new("RedFlareProxy Benchmarking Tool")
                     .version("0.1")
                     .author("Kevin X. <xiaok10003@gmail.com>")
                     .about("Used for benching redis proxies")

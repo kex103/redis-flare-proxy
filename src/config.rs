@@ -12,23 +12,10 @@ pub enum Distribution {
 }
 
 #[derive(Deserialize, Clone, Serialize, Eq, PartialEq)]
-pub struct RustProxyConfig {
+pub struct RedFlareProxyConfig {
     pub admin: AdminConfig,
     pub pools: BTreeMap<String, BackendPoolConfig>,
 }
-/*
-one_at_a_time
-md5
-crc16
-crc32 (crc32 implementation compatible with libmemcached)
-crc32a (correct crc32 implementation as per the spec)
-fnv1_64
-fnv1a_64
-fnv1_32
-fnv1a_32
-hsieh
-murmur
-jenkins*/
 
 fn default_retry_timeout() -> usize {
     return 1000;
@@ -93,7 +80,7 @@ pub struct AdminConfig {
     pub listen: String,
 }
 
-pub fn load_config(full_config_path: String) -> Result<RustProxyConfig, String> {
+pub fn load_config(full_config_path: String) -> Result<RedFlareProxyConfig, String> {
     // TODO: Change to result
     // TOOD: trim config_path
     let config_path = full_config_path.trim();
@@ -111,7 +98,7 @@ pub fn load_config(full_config_path: String) -> Result<RustProxyConfig, String> 
         }
     };
     debug!("Config contents: {}", file_contents);
-    let config: RustProxyConfig = match toml::from_str(&file_contents) {
+    let config: RedFlareProxyConfig = match toml::from_str(&file_contents) {
         Ok(config) => config,
         Err(err) => {
             return Err(format!("Failed to convert file to toml {}: {:?}", config_path, err));

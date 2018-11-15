@@ -1,4 +1,4 @@
-use rustproxy::{StreamType, NULL_TOKEN, Subscriber};
+use redflareproxy::{StreamType, NULL_TOKEN, Subscriber};
 use config::BackendConfig;
 use backendpool::{BackendPool, parse_redis_response};
 use bufstream::BufStream;
@@ -321,7 +321,7 @@ impl SingleBackend {
         // Get rid of first queue.
         self.queue.pop_front();
 
-        self.write_to_client(head.0, "-ERR RustProxy timed out\r\n");
+        self.write_to_client(head.0, "-ERR Proxy timed out\r\n");
 
         if &target_timestamp == time {
             if self.failure_limit > 0 {
@@ -563,7 +563,7 @@ impl SingleBackend {
         debug!("Read from backend: {}", response);
         if response.len() == 0 {
             debug!("Completely empty string response from backend {:?}!", self.socket);
-            // TODO: remote connection can disconnect, and rustproxy won't' detect
+            // TODO: remote connection can disconnect, and redflareproxy won't' detect
             // that it's down until a client attempts to hit it.
             // Should we listen for peer close to mark it early?
             return response;

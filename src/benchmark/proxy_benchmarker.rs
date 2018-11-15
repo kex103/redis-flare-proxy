@@ -7,7 +7,6 @@ use std::net::SocketAddr;
 use std::io::Write;
 use bufstream::BufStream;
 use std::io::BufRead;
-use std::io::Read;
 use std::ops::AddAssign;
 
 type Host = String;
