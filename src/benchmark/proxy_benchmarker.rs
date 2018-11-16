@@ -270,7 +270,9 @@ impl ProxyBenchmarker {
                     let mut report_results_fn = move |_benchmarker_id:usize, request_duration:Duration| {
                         requests_completed.add_assign(1);
                         total_request_duration.add_assign(request_duration);
-                        if request_duration > *longest_request_duration {
+                        // Skip the first set of requests as they usually require initialization.
+                        if requests_completed > &mut NUMBER_OF_CLIENTS && request_duration > *longest_request_duration {
+                            println!("Longest latency is now: {:?} request number: {}", request_duration, requests_completed);
                             let a = request_duration - *longest_request_duration;
                             longest_request_duration.add_assign(a);
                         }
