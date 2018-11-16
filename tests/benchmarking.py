@@ -7,61 +7,13 @@ import os
 import sys
 import time
 import unittest
+from test_util import TestUtil
 
-def kill_redis_server(port):
-    try:
-        r = redis.Redis(port=port)
-        if r.ping():
-            r.shutdown()
-            print("Killed redis server at port: {}".format(port))
-            return
-    except redis.exceptions.ConnectionError, e:
-        pass
+class BenchmarkProxy(TestUtil):
 
-class BenchmarkProxy(unittest.TestCase):
-
-    subprocesses = []
-    proxy_admin_ports = []
-
-    def setUp(self):
-        log_file = "tests/log/{}.log".format(self.id())
-        try:
-            os.remove(log_file)
-        except:
-            pass
-        files = os.listdir("tests/tmp")
-        for f in files:
-            if not os.path.isdir(f) and ".conf" in f:
-                os.remove("tests/tmp/{}".format(f))
-        self.build_proxy()
-
-    def tearDown(self):
-        for proxy_admin_port in self.proxy_admin_ports:
-            try:
-                r = redis.Redis(port=proxy_admin_port)
-                r.shutdown()
-            except:
-                pass
-
-        for subprocess in self.subprocesses:
-            try:
-                subprocess.kill()
-            except:
-                pass
-
-    def build_proxy(self):
-        if call(["cargo", "build", "--release"]) != 0:
-            raise AssertionError('Failed to compile RedFlareProxy with cargo')
-
-    def start_redis_server(self, port):
-        FNULL = open(os.devnull, 'w')
-        process = subprocess.Popen(["redis-server", "--port", "{}".format(port)], stdout=FNULL, stderr=subprocess.STDOUT)
-
-        time.sleep(1.0)
-        r = redis.Redis(port=port)
-        if not r.ping():
-            raise AssertionError('Redis server is unavailable at port: {}. Stopping test.'.format(port))
-        self.subprocesses.append(process)
+    @classmethod
+    def setupClass(self):
+        TestUtil.build_proxy(['--release'])
 
     def start_proxy(self, config_path):
         log_file = "tests/log/{}.log".format(self.id())
@@ -119,7 +71,7 @@ class BenchmarkProxy(unittest.TestCase):
         self.fail("Spawned process failed to complete within the expected time. This means the performance is abysmally slow, or, more likely, the proxy failed to respond")
 
     def test_benchmark_nutcracker(self):
-        kill_redis_server(6380)
+        TestUtil.kill_redis_server(6380)
         self.start_redis_server(6380)
 
         self.start_nutcracker("/home/kxiao/rustproxy/tests/conf/timeout1.yaml")
@@ -127,32 +79,31 @@ class BenchmarkProxy(unittest.TestCase):
 
 
     def test_benchmark_raw(self):
-        kill_redis_server(6380)
+        TestUtil.kill_redis_server(6380)
         self.start_redis_server(6380)
         self.run_redis_benchmark(6380)
 
     def test_benchmark_single_backend(self):
-        kill_redis_server(6380)
+        TestUtil.kill_redis_server(6380)
         self.start_redis_server(6380)
 
         self.start_proxy("/home/kxiao/rustproxy/tests/conf/timeout1.toml")
         self.run_redis_benchmark(1531)
 
     def test_benchmark_single_backend_with_profiling(self):
-        kill_redis_server(6380)
+        TestUtil.kill_redis_server(6380)
         proc = self.start_benchmarker(1531, 6380)
 
         self.start_proxy_with_profiling("/home/kxiao/rustproxy/tests/conf/timeout1.toml")
         proc.wait()
 
     def test_benchmark_single_pool(self):
-        kill_redis_server(6380)
         proc = self.start_benchmarker(1531, 6380)
         self.start_proxy("/home/kxiao/rustproxy/tests/conf/timeout1.toml")
         proc.wait()
 
     def test_benchmark_nutcracker_single_pool(self):
-        kill_redis_server(6380)
+        TestUtil.kill_redis_server(6380)
         proc = self.start_benchmarker(1531, 6380)
         self.start_nutcracker("/home/kxiao/rustproxy/tests/conf/timeout1.yaml")
         proc.wait()
@@ -167,4 +118,5 @@ class BenchmarkProxy(unittest.TestCase):
         pass
 
 if __name__ == "__main__":
+    BenchmarkProxy.setupClass()
     unittest.main()
