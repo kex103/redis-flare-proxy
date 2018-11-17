@@ -52,6 +52,10 @@ class TestUtil(unittest.TestCase):
                 pass
 
     @staticmethod
+    def script_dir():
+        return os.path.dirname(os.path.realpath(__file__))
+
+    @staticmethod
     def build_proxy(args=[]):
         if call(["cargo", "build"] + args) != 0:
             raise AssertionError('Failed to compile RedFlareProxy with cargo')
