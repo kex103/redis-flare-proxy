@@ -9,6 +9,13 @@ use std::time::Instant;
 use cluster_backend::init_logging_info;
 
 #[derive(Debug)]
+pub enum RedisError {
+    NoBackend,
+    Unknown,
+    UnsupportedCommand,
+}
+
+#[derive(Debug)]
 pub struct RedisProtocolError {}
 impl fmt::Display for RedisProtocolError {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {

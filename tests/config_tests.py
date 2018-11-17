@@ -1,5 +1,6 @@
 #!/usr/bin/env python
 import redis
+import time
 from test_util import TestUtil
 
 class ConfigTests(TestUtil):
@@ -46,6 +47,7 @@ class ConfigTests(TestUtil):
             response = r.execute_command("SWITCHCONFIG")
         except redis.ConnectionError, e:
             pass
+        time.sleep(0.2)
         TestUtil.populate_redis_key(6381, "key4")
         self.assert_redis_key(1532, "key4")
 

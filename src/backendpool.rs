@@ -5,7 +5,7 @@ use redflareproxy::{StreamType, Subscriber};
 use redflareproxy::{generate_backend_token, generate_client_token};
 use config::{Distribution, BackendPoolConfig};
 use backend::{Backend};
-use redisprotocol::{extract_key};
+use redisprotocol::{extract_key, RedisError};
 
 use mio::*;
 use mio::tcp::{TcpListener, TcpStream};
@@ -132,8 +132,13 @@ impl BackendPool {
 
     // Based on the given command, determine which Backend to use, if any.
     // We support Ketama, Modula, and Random.
-    pub fn shard(&mut self, command: &String) -> Option<&mut Backend> {
-        let key = extract_key(command).unwrap();
+    pub fn shard(&mut self, command: &String) -> Result<&mut Backend, RedisError> {
+        let key = match extract_key(command) {
+            Ok(key) => key,
+            Err(_) => {
+                return Err(RedisError::UnsupportedCommand);
+            }
+        };
         let tag = get_tag(key, &self.config.hash_tag);
 
         // TODO: Also, we want to cache the shardmap building if possible.
@@ -150,7 +155,7 @@ impl BackendPool {
                 // TODO: Check if there's any discrepancy between this key and twemproxy.
             }
             let hashed_token = consistent_hash.get(tag.as_bytes()).unwrap().token;
-            return self.backend_map.get_mut(&hashed_token);
+            return Ok(self.backend_map.get_mut(&hashed_token).unwrap());
         }
 
         // Get total size:
@@ -187,13 +192,13 @@ impl BackendPool {
                     }
                 }
                 match answer {
-                    Some(backend_token) => return self.backend_map.get_mut(&backend_token),
+                    Some(backend_token) => return Ok(self.backend_map.get_mut(&backend_token).unwrap()),
                     None => panic!("Overflowed when determining shard!"),
                 }
             }
             Err(error) => debug!("Received {} while sharding!", error),
         }
-        None
+        Err(RedisError::Unknown)
     }
 
     pub fn handle_timeout(
@@ -305,14 +310,30 @@ impl BackendPool {
         // Perhaps the API should be.. write_backend(message_string, token)
         // A cluster needs... access to all possible connections.. ?
         // Or it has its own.
-        let success = {
-            let backend = self.shard(&client_request).unwrap();
-            backend.write_message(&client_request, client_token)
-        };
+        let mut err_resp = None;
+        match self.shard(&client_request) {
+            Ok(backend) => {
+                if !backend.write_message(&client_request, client_token) {
+                    err_resp = Some("-ERROR: Not connected\r\n".to_owned());
+                }
+            }
+            Err(RedisError::NoBackend) => {
+                err_resp = Some("-ERROR: No backend\r\n".to_owned());
+            }
+            Err(RedisError::UnsupportedCommand) => {
+                err_resp = Some("-ERROR: Unsupported command\r\n".to_owned());
+            }
+            Err(_reason) => {
+                debug!("Failed to shard: reason: {:?}", _reason);
+            }
+        }
 
-        if !success {
-            let err_resp = "-ERROR: Not connected\r\n".to_owned();
-            self.write_to_client(client_token, err_resp.to_owned(), written_sockets);
+        match err_resp {
+            Some(resp) => {
+                self.write_to_client(client_token, resp, written_sockets);
+            }
+            None => {
+            }
         }
         debug!("All done handling client!");
     }
