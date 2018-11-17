@@ -8,6 +8,11 @@ import time
 import unittest
 import socket
 from test_util import TestUtil
+from timeout_tests import TimeoutTests
+from cluster_tests import ClusterTests
+from admin_tests import AdminTests
+from config_tests import ConfigTests
+from sharding_tests import ShardingTests
 
 class TestRedFlareProxy(TestUtil):
 
@@ -15,49 +20,6 @@ class TestRedFlareProxy(TestUtil):
         self.start_redis_server(6380)
         self.start_proxy("tests/conf/testconfig1.toml")
 
-        TestUtil.verify_redis_connection(1531)
-
-    def test_single_backend_with_timeout(self):
-        self.start_redis_server(6381)
-        self.start_delayer(6380, 6381, 50)
-        self.start_proxy("tests/conf/timeout1.toml")
-
-        TestUtil.verify_redis_connection(1531)
-
-    def test_single_backend_failed_timeout(self):
-        self.start_redis_server(6381)
-        self.start_delayer(6380, 6381, 101)
-        self.start_proxy("tests/conf/timeout1.toml")
-
-        TestUtil.verify_redis_error(1531, "ERROR: Not connected")
-
-    def test_single_backend_ejected(self):
-        self.start_redis_server(6381)
-        self.start_delayer(6380, 6381, 2, 6382)
-        self.start_proxy("tests/conf/retrylimit1.toml")
-
-        TestUtil.verify_redis_connection(1531)
-
-        # Set a long delay, so that all requests to the backend will time out.
-        conn_to_delayer = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-        conn_to_delayer.connect(("0.0.0.0", 6382))
-        conn_to_delayer.sendall("SETDELAY 401")
-        # Verify that requests time out. After the 3rd failure, the backend is blacklisted.
-        TestUtil.verify_redis_error(1531, "Proxy timed out")
-        TestUtil.verify_redis_error(1531, "Proxy timed out")
-        TestUtil.verify_redis_error(1531, "Proxy timed out")
-        TestUtil.verify_redis_error(1531, "ERROR: Not connected")
-        TestUtil.verify_redis_error(1531, "ERROR: Not connected")
-        conn_to_delayer.sendall("BLOCK_NEW_CONNS 750")
-        time.sleep(1)
-
-        # Set a short delay, so requests will stop timing out.
-        conn_to_delayer.sendall("SETDELAY 2")
-        # Wait a second, to give time for the proxy to detect that the backend is available again.
-        time.sleep(1)
-        # Verify that requests succeed now.
-        TestUtil.verify_redis_connection(1531)
-        TestUtil.verify_redis_connection(1531)
         TestUtil.verify_redis_connection(1531)
 
     def test_no_backend_failure(self):
@@ -68,16 +30,6 @@ class TestRedFlareProxy(TestUtil):
         # Then spawn a proxy pointing to an invalid backend. Verify the redis error should be "Not connected"
         self.start_proxy("tests/conf/timeout1.toml")
         TestUtil.verify_redis_error(1531, "ERROR: Not connected")
-
-# test a backend responding with just a partial response and then failing to ever respond.
-    def test_partial_response_timeout(self):
-        # Test having a broken pipe.
-        # First, spawn a proxy, then spawn a mock redis.
-        # Have the mock redis cut off the connection partway through the redis response.
-        # Verify that the proxy correctly gives a "Broken pipe" error.
-        # Verify that subsequent requests get the same error.
-        # Verify that the proxy recovers and works normally afterwards.
-        pass
 
 # Test successful, multiple (4) backends, no timeout. verify that the sharding is correct.
     def test_multiple_backend_no_timeout(self):
@@ -450,246 +402,6 @@ class TestRedFlareProxy(TestUtil):
         # quit
         # select
         # swapdb
-
-    def test_backend_ejection(self):
-        # Test that auto backend host ejection works as expected.
-        # 1. Verify that when a host fails enough times, all requests get shifted by the modula.
-        # 2. Verify that when another host fails, all requests get shifted again.
-        # 3. Verify that when that 2nd failed host recovers, requests shift back.
-        # 4. Verify requests return to original sharding when the 1st failed host recovers.
-        # TODO: Set up a test while a constant stream of redis requests occurs. We want to make sure the switch is clean.
-
-        self.start_redis_server(6381)
-        self.start_redis_server(6382)
-        self.start_redis_server(6386)
-        self.start_redis_server(6380)
-        ports = [6381, 6382, 6386, 6380]
-        self.start_delayer(incoming_port=6384, outgoing_port=6380, delay=1, admin_port=6385)
-        self.start_delayer(incoming_port=6383, outgoing_port=6386, delay=1, admin_port=6387)
-        self.start_proxy("tests/conf/multishardeject1.toml")
-        TestUtil.verify_redis_connection(1531)
-
-        TestUtil.populate_redis_key(1531, "key1")
-        self.assert_redis_key(6381, "key1")
-        TestUtil.populate_redis_key(1531, "key2")
-        self.assert_redis_key(6382, "key2")
-        TestUtil.populate_redis_key(1531, "key3")
-        self.assert_redis_key(6386, "key3")
-        TestUtil.populate_redis_key(1531, "key4")
-        self.assert_redis_key(6380, "key4")
-        TestUtil.populate_redis_key(1531, "key5")
-        self.assert_redis_key(6381, "key5")
-        TestUtil.populate_redis_key(1531, "key6")
-        self.assert_redis_key(6382, "key6")
-
-        TestUtil.flush_keys(ports)
-
-        # Set a long delay, so that all requests to the backend will time out.
-        conn_to_delayer1 = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-        conn_to_delayer1.connect(("0.0.0.0", 6385))
-        conn_to_delayer1.sendall("SETDELAY 400")
-
-        # Send a request to the bad backend, to make proxy realize it is down.
-        # TODO: One feature is have proxy ping health checks to backends periodically.
-        try:
-            TestUtil.populate_redis_key(1531, "key4")
-            self.fail("Expected to time out")
-        except:
-            pass
-        self.assert_redis_key(6380, "key4")
-
-        TestUtil.populate_redis_key(1531, "key4")
-        self.assert_redis_key(6381, "key4")
-        TestUtil.populate_redis_key(1531, "key1")
-        self.assert_redis_key(6382, "key1")
-        TestUtil.populate_redis_key(1531, "key2")
-        self.assert_redis_key(6381, "key2")
-        TestUtil.populate_redis_key(1531, "key3")
-        self.assert_redis_key(6386, "key3")
-        TestUtil.populate_redis_key(1531, "key4")
-        self.assert_redis_key(6381, "key4")
-        TestUtil.populate_redis_key(1531, "key5")
-        self.assert_redis_key(6386, "key5")
-        TestUtil.populate_redis_key(1531, "key6")
-        self.assert_redis_key(6382, "key6")
-
-        TestUtil.flush_keys(ports)
-
-        # Set a long delay, so that all requests to the backend will time out.
-        conn_to_delayer2 = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-        conn_to_delayer2.connect(("0.0.0.0", 6387))
-        conn_to_delayer2.sendall("SETDELAY 401")
-        try:
-            TestUtil.populate_redis_key(1531, "key3")
-            self.fail("Expected to time out")
-        except:
-            pass
-        self.assert_redis_key(6386, "key3")
-
-        TestUtil.populate_redis_key(1531, "key1")
-        self.assert_redis_key(6381, "key1")
-        TestUtil.populate_redis_key(1531, "key2")
-        self.assert_redis_key(6382, "key2")
-        TestUtil.populate_redis_key(1531, "key3")
-        self.assert_redis_key(6381, "key3")
-        # key4 can shift because it is originally mapped to a bad instance.
-        TestUtil.populate_redis_key(1531, "key4")
-        self.assert_redis_key(6382, "key4")
-        TestUtil.populate_redis_key(1531, "key5")
-        self.assert_redis_key(6381, "key5")
-        TestUtil.populate_redis_key(1531, "key6")
-        self.assert_redis_key(6382, "key6")
-
-        TestUtil.flush_keys(ports)
-
-        conn_to_delayer2.sendall("SETDELAY 1")
-        time.sleep(1)
-
-        TestUtil.populate_redis_key(1531, "key3")
-        self.assert_redis_key(6386, "key3")
-        TestUtil.populate_redis_key(1531, "key4")
-        self.assert_redis_key(6381, "key4")
-        TestUtil.populate_redis_key(1531, "key1")
-        self.assert_redis_key(6382, "key1")
-        TestUtil.populate_redis_key(1531, "key2")
-        self.assert_redis_key(6381, "key2")
-        TestUtil.populate_redis_key(1531, "key3")
-        self.assert_redis_key(6386, "key3")
-        TestUtil.populate_redis_key(1531, "key4")
-        self.assert_redis_key(6381, "key4")
-        TestUtil.populate_redis_key(1531, "key5")
-        self.assert_redis_key(6386, "key5")
-        TestUtil.populate_redis_key(1531, "key6")
-        self.assert_redis_key(6382, "key6")
-
-        TestUtil.flush_keys(ports)
-
-        conn_to_delayer1.sendall("SETDELAY 1")
-        time.sleep(1)
-
-        TestUtil.populate_redis_key(1531, "key1")
-        self.assert_redis_key(6381, "key1")
-        TestUtil.populate_redis_key(1531, "key2")
-        self.assert_redis_key(6382, "key2")
-        TestUtil.populate_redis_key(1531, "key3")
-        self.assert_redis_key(6386, "key3")
-        TestUtil.populate_redis_key(1531, "key4")
-        self.assert_redis_key(6380, "key4")
-        TestUtil.populate_redis_key(1531, "key5")
-        self.assert_redis_key(6381, "key5")
-        TestUtil.populate_redis_key(1531, "key6")
-        self.assert_redis_key(6382, "key6")
-
-    def test_conhashing(self):
-        pass
-        # Test that consistent hashing works as expected
-        # 1. Test that hashing is similar to twemproxy. (4 backends)
-        # 2. Verify that when one backend is ejected (with auto_eject_host), all requests to other backends remain, but requests to the failed one gets moved.
-        # 3. Verify the same happens when another backend is ejected. Verify it's the same as twemproxy.
-        # 4. Verify recover of 2nd
-        # 5. Verify recovery of first.
-        # TODO: Set up a test while a constant stream of redis requests occurs. We want to make sure the switch is clean.
-
-# Test cluster backends, no timeout. Verify sharding is correct.
-    def test_cluster_no_timeout(self):
-        # use redis cluster configs
-        # place runtime configs in test/tmp folder
-        # make surre ports 7000-7002 and 17000-17002 are open.
-        # start up redis servers
-        # start up redflareproxy
-        # check sharding.
-        self.start_redis_cluster_server(7000)
-        self.start_redis_cluster_server(7001)
-        self.start_redis_cluster_server(7002)
-        self.initialize_redis_cluster([7000, 7001, 7002])
-        self.start_proxy("tests/conf/cluster1.toml")
-
-        TestUtil.verify_redis_connection(1533)
-
-        TestUtil.populate_redis_key(1533, "key1")
-        self.assert_redis_key(1533, "key1")
-
-        TestUtil.populate_redis_key(1533, "key2")
-        self.assert_redis_key(1533, "key2")
-
-    def test_retry_connection(self):
-        self.start_proxy("tests/conf/timeout1.toml")
-
-        TestUtil.verify_redis_error(1531, "ERROR: Not connected")
-
-        self.start_redis_server(6380)
-        time.sleep(1) # TODO: Configure different retry frequencies besides 1 second
-
-        TestUtil.verify_redis_connection(1531)
-
-    def test_admin(self):
-        self.start_proxy("tests/conf/timeout1.toml")
-
-        r = redis.Redis(port=1530, decode_responses=True)
-        response = r.execute_command("INFO")
-        self.assertEqual(response.get('__raw__'), ["DERP"]);
-
-    def test_switch_config(self):
-        self.start_redis_server(6380)
-        self.start_redis_server(6381)
-        self.start_proxy("tests/conf/timeout1.toml")
-
-        r = redis.Redis(port=1530)
-        response = r.execute_command("LOADCONFIG tests/conf/timeout1.toml")
-        self.assertTrue(response)
-
-        TestUtil.populate_redis_key(6380, "key1")
-        self.assert_redis_key(1531, "key1")
-
-        try:
-            r.execute_command("SWITCHCONFIG")
-            self.fail("Expected failure from SWITCHCONFIG")
-        except redis.ResponseError, e:
-            self.assertEqual(str(e), "The configs are the same!")
-
-        # Same admin port, different listen_port.
-        response = r.execute_command("LOADCONFIG tests/conf/swapconfig2.toml")
-        self.assertTrue(response)
-
-        TestUtil.populate_redis_key(6380, "key2")
-        self.assert_redis_key(1531, "key2")
-
-        try:
-            response = r.execute_command("SWITCHCONFIG")
-        except redis.ConnectionError, e:
-            pass
-
-        TestUtil.populate_redis_key(6380, "key3")
-        self.assert_redis_key(1532, "key3")
-
-        # Same admin port, same listener, different backend.
-        r = redis.Redis(port=1530)
-        response = r.execute_command("LOADCONFIG tests/conf/swapconfig3.toml")
-        self.assertTrue(response)
-
-        try:
-            response = r.execute_command("SWITCHCONFIG")
-        except redis.ConnectionError, e:
-            pass
-        TestUtil.populate_redis_key(6381, "key4")
-        self.assert_redis_key(1532, "key4")
-
-
-        # Different admin port, new pools.
-        r = redis.Redis(port=1530)
-        response = r.execute_command("LOADCONFIG tests/conf/swapconfig4.toml")
-        self.assertTrue(response)
-
-        try:
-            response = r.execute_command("SWITCHCONFIG")
-        except redis.ConnectionError, e:
-            pass
-        TestUtil.populate_redis_key(6381, "key5")
-        self.assert_redis_key(1532, "key5")
-
-        r = redis.Redis(port=1540)
-        response = r.execute_command("LOADCONFIG tests/conf/swapconfig3.toml")
-        self.assertTrue(response)
 
 # Test multiple backends, 
 if __name__ == "__main__":
