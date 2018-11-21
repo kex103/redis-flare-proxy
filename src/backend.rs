@@ -1,7 +1,7 @@
+use bufreader::BufReader;
 use redflareproxy::{StreamType, NULL_TOKEN, Subscriber};
 use config::BackendConfig;
 use backendpool::{BackendPool, parse_redis_response};
-use bufstream::BufStream;
 use mio::*;
 use mio_more::timer::{Timer, Builder};
 use mio::tcp::{TcpStream};
@@ -160,7 +160,7 @@ pub struct SingleBackend {
     subscribers_registry: Rc<RefCell<HashMap<Token, Subscriber>>>,
     poll_registry: Rc<RefCell<Poll>>,
     written_sockets: *mut VecDeque<(Token, StreamType)>,
-    socket: Option<BufStream<TcpStream>>,
+    socket: Option<BufReader<TcpStream>>,
     timer: Option<Timer<bool>>,
     pub timeout: usize,
     waiting_for_auth_resp: bool,
@@ -226,7 +226,7 @@ impl SingleBackend {
 
         debug!("Registered backend: {:?}", &self.token);
         self.poll_registry.borrow_mut().register(&socket, self.token, Ready::readable() | Ready::writable(), PollOpt::edge()).unwrap();
-        self.socket = Some(BufStream::new(socket));
+        self.socket = Some(BufReader::new(socket));
         self.subscribers_registry.borrow_mut().insert(self.token, Subscriber::PoolServer(self.parent_token()));
 
         self.change_state(BackendStatus::CONNECTING);
@@ -315,6 +315,7 @@ impl SingleBackend {
             // This means that we need to save all the timestamps of each request?
             // Or can we only record first and last?
             // It seems like the mio timer might be able to take multiple timeouts? This would be nifty then.
+            debug!("This is wrong timestamp? {:?} vs {:?}", target_timestamp, time);
             self.timer = None;
             return false;
         }
@@ -332,17 +333,23 @@ impl SingleBackend {
         self.write_to_client(head.0, "-ERR Proxy timed out\r\n");
 
         if &target_timestamp == time {
+            if  self.status != BackendStatus::READY {
+                // Mark it down because it never initialized properly.
+                return true;
+            }
             if self.failure_limit > 0 {
                 self.failure_count += 1;
                 if self.failure_count >= self.failure_limit {
+                    debug!("Marking backend as failed");
                     return true;
                 }
             }
+
+            return false;
         }
         else {
             panic!("This shouldn't happen. Timestamp hit: {:?}. Missed previous timestamp: {:?}", target_timestamp, time);
         }
-        return false;
     }
 
     // Marks the backend as down. Returns an error message to all pending requests.
@@ -376,7 +383,7 @@ impl SingleBackend {
     pub fn flush_stream(&mut self) {
         match self.socket {
             Some(ref mut socket) => {
-                let _ = socket.flush();
+                let _ = socket.get_mut().flush();
             }
             None => {
                 debug!("Backend {:?} stream not found when flushing. Did it just get DISCONNECTED?", self.token);
@@ -508,7 +515,7 @@ impl SingleBackend {
         }
     }
 
-    fn parent_clients(&self) -> &mut HashMap<Token, BufStream<TcpStream>> {
+    fn parent_clients(&self) -> &mut HashMap<Token, BufReader<TcpStream>> {
         unsafe {
             let parent_pool = &mut *self.parent;
             return &mut parent_pool.client_sockets;
@@ -529,7 +536,7 @@ impl SingleBackend {
         match self.parent_clients().get_mut(&client_token) {
             Some(stream) => {
                 debug!("Wrote to client {:?}: {:?}", client_token, message);
-                let _ = stream.write(&message.as_bytes());
+                let _ = stream.get_mut().write(&message.as_bytes());
                 self.register_written_socket(client_token, StreamType::PoolClient);
             }
             _ => panic!("Found listener instead of stream! for clienttoken {:?}", client_token),
@@ -544,7 +551,7 @@ impl SingleBackend {
         debug!("Write to backend {:?} {}: {:?}", &self.token, self.host, std::str::from_utf8(&message));
         match self.socket {
             Some(ref mut socket) => {
-                let _ = socket.write(&message);
+                let _ = socket.get_mut().write(&message);
             }
             None => panic!("No connection to backend"),
         }
@@ -595,7 +602,7 @@ pub fn timeout_to_backend_token(token: &Token) -> Token {
 
 // This extracts the command from the stream.
 // TODO: Use a StreamingIterator: https://github.com/rust-lang/rfcs/pull/1598
-pub fn parse_redis_command(stream: &mut BufStream<TcpStream>) -> String {
+pub fn parse_redis_command(stream: &mut BufReader<TcpStream>) -> String {
     let mut command = String::new();
     let mut string = String::new();
     let _ = stream.read_line(&mut string);

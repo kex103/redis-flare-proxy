@@ -27,6 +27,8 @@ use std::cell::Cell;
 use std::cell::RefCell;
 use std::rc::Rc;
 
+use bufreader::BufReader;
+
 #[derive(Clone)]
 struct TokenNode {
     token: Token,
@@ -46,7 +48,7 @@ pub struct BackendPool {
     pub backends: VecDeque<Token>,
     pub backend_map: HashMap<Token, Backend>,
     pub all_backend_tokens: HashMap<Token, Token>,
-    pub client_sockets: HashMap<Token, BufStream<TcpStream>>,
+    pub client_sockets: HashMap<Token, BufReader<TcpStream>>,
     pub listen_socket: Option<TcpListener>,
 }
 
@@ -254,7 +256,7 @@ impl BackendPool {
         match poll.borrow_mut().register(&socket, client_token, Ready::readable(), PollOpt::edge()) {
             Ok(_) => {
 
-                self.client_sockets.insert(client_token, BufStream::new(socket));
+                self.client_sockets.insert(client_token, BufReader::new(socket));
                 subscribers.insert(client_token, Subscriber::PoolClient(pool_token));
                 info!("Backend Connection accepted: client {:?}", client_token);
             }
@@ -354,7 +356,7 @@ impl BackendPool {
         match self.client_sockets.get_mut(&client_token) {
             Some(stream) => {
                 debug!("Wrote to client {:?}: {:?}", client_token, message);
-                let _ = stream.write(&message.into_bytes()[..]);
+                let _ = stream.get_mut().write(&message.into_bytes()[..]);
                 written_sockets.push_back((client_token.clone(), StreamType::PoolClient));
             }
             _ => panic!("Found listener instead of stream!"),
@@ -401,7 +403,7 @@ fn get_tag<'a>(key: &'a [u8], tags: &String) -> &'a [u8] {
 }
 
 // TODO: Rewrite this
-pub fn parse_redis_response(stream: &mut BufStream<TcpStream>) -> String {
+pub fn parse_redis_response(stream: &mut BufReader<TcpStream>) -> String {
     let mut string = String::new();
     let _ = stream.read_line(&mut string);
     match string.chars().next() {
@@ -455,7 +457,7 @@ pub fn parse_redis_response(stream: &mut BufStream<TcpStream>) -> String {
     string
 }
 
-pub fn _parse_redis_response(stream: &mut BufStream<TcpStream>) -> &str {
+pub fn _parse_redis_response(stream: &mut BufReader<TcpStream>) -> &str {
     let buf = stream.fill_buf().unwrap();
     match buf.get(0).unwrap() {
         // $

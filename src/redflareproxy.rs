@@ -208,7 +208,7 @@ impl RedFlareProxy {
                 StreamType::AdminClient => {
                     match self.admin.client_sockets.get_mut(&stream_token) {
                         Some(stream) => {
-                            let _ = stream.flush();
+                            let _ = stream.get_mut().flush();
                         }
                         None => {
                             debug!("write_to_sockets: AdminClient {:?} no longer registered. Did a switch_config occur?", stream_token);
@@ -223,7 +223,7 @@ impl RedFlareProxy {
                                 Subscriber::PoolClient(pool_token) => {
                                     let pool = self.backendpools.get_mut(&pool_token).unwrap();
                                     debug!("Writing out to {:?}", stream_token);
-                                    let _ = pool.client_sockets.get_mut(&stream_token).unwrap().flush();
+                                    let _ = pool.client_sockets.get_mut(&stream_token).unwrap().get_mut().flush();
                                 }
 
                                 _ => panic!("write_to_sockets: Mismatch between StreamType and Subscriber: {:?}. Shutting down.", stream_token),

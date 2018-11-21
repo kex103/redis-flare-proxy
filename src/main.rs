@@ -34,6 +34,7 @@ mod cluster_backend;
 mod backendpool;
 mod redisprotocol;
 mod hash;
+mod bufreader;
 
 /*
 Entrypoint for redflareproxy.

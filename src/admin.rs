@@ -4,6 +4,7 @@ use config::{AdminConfig};
 
 use mio::*;
 use bufstream::BufStream;
+use bufreader::BufReader;
 use mio::tcp::{TcpListener, TcpStream};
 use std::collections::*;
 use fxhash::FxHashMap as HashMap;
@@ -12,7 +13,7 @@ use std::io::Write;
 use std::cell::Cell;
 
 pub struct AdminPort {
-    pub client_sockets: HashMap<ClientToken, BufStream<TcpStream>>,
+    pub client_sockets: HashMap<ClientToken, BufReader<TcpStream>>,
     pub socket: TcpListener,
     pub config: AdminConfig,
 }
@@ -72,13 +73,13 @@ impl AdminPort {
             }
         };
         subscribers.insert(token, Subscriber::AdminClient);
-        self.client_sockets.insert(token, BufStream::new(c));
+        self.client_sockets.insert(token, BufReader::new(c));
     }
 
     pub fn write_to_client(&mut self, client_token: ClientToken, message: String, written_sockets: &mut Box<VecDeque<(Token, StreamType)>>) {
         match self.client_sockets.get_mut(&client_token) {
             Some(client_stream) => {
-                let _ = client_stream.write(&message.into_bytes()[..]);
+                let _ = client_stream.get_mut().write(&message.into_bytes()[..]);
                 written_sockets.push_back((client_token, StreamType::AdminClient));
             }
             None => {

@@ -217,7 +217,8 @@ class TestUtil(unittest.TestCase):
         FNULL = open(os.devnull, 'w')
         process = subprocess.Popen(
             ["python", "tests/delayed_responder.py", str(incoming_port), str(outgoing_port), str(delay), str(admin_port)],
-            stdout=log_out
+            stdout=log_out,
+            stderr=log_out,
         )
         self.subprocesses.append(process)
 

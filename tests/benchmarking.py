@@ -90,7 +90,7 @@ class BenchmarkProxy(TestUtil):
         self.run_redis_benchmark(1531)
 
 
-    def test_benchmark_raw(self):
+    def test_benchmark_raw_redis(self):
         self.start_redis_server(6380)
         self.run_redis_benchmark(6380)
 
