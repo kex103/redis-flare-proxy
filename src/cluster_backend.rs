@@ -325,7 +325,7 @@ impl ClusterBackend {
 
     fn initialize_slotmap(&mut self, backend_token: Token) {
         let host = self.hosts.get_mut(&backend_token).unwrap();
-        host.write_message("*2\r\n$7\r\nCLUSTER\r\n$5\r\nSLOTS\r\n", NULL_TOKEN);
+        host.write_message(b"*2\r\n$7\r\nCLUSTER\r\n$5\r\nSLOTS\r\n", NULL_TOKEN);
         self.queue.push_back(host.queue.back().unwrap().clone());
     }
 
@@ -435,21 +435,22 @@ impl ClusterBackend {
         false
     }
 
-    fn get_shard(&self, message: String)-> Token {
+    fn get_shard(&self, message: &[u8])-> Token {
         let key = extract_key(&message).unwrap();
-        let hash_no = State::<XMODEM>::calculate(key.as_bytes());
+        let hash_no = State::<XMODEM>::calculate(key);
         let shard_no = hash_no % 16384;
         let hostname = self.slots.get(shard_no as usize).unwrap();
         debug!("KEX: Sharded to {}, which is {}. {:?}", shard_no as usize, hostname, self.hostnames.keys());
         return self.hostnames.get(hostname).unwrap().clone();
     }
 
-    pub fn write_message(&mut self,
-        message: &str,
+    pub fn write_message(
+        &mut self,
+        message: &[u8],
         client_token: Token
     ) -> bool {
         // get the predicted backend to write to.
-        let backend_token = self.get_shard(message.to_string());
+        let backend_token = self.get_shard(message);
         debug!("Cluster Writing to {:?}. Source: {:?}", backend_token, client_token);
         let result = self.hosts.get_mut(&backend_token).unwrap().write_message(message, client_token);
         if result {

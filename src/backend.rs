@@ -111,8 +111,9 @@ impl Backend {
         }
     }
 
-    pub fn write_message(&mut self,
-        message: &str,
+    pub fn write_message(
+        &mut self,
+        message: &[u8],
         client_token: Token
     ) -> bool {
         match self.single {
@@ -247,7 +248,7 @@ impl SingleBackend {
             request.push_str("\r\n");
             request.push_str(&self.config.auth);
             request.push_str("\r\n");
-            self.write_to_stream(NULL_TOKEN, &request);
+            self.write_to_stream(NULL_TOKEN, &request.as_bytes());
             self.waiting_for_auth_resp = true;
             wait_for_resp = true;
         }
@@ -259,13 +260,13 @@ impl SingleBackend {
             request.push_str("\r\n");
             request.push_str(&self.config.db.to_string());
             request.push_str("\r\n");
-            self.write_to_stream(NULL_TOKEN, &request);
+            self.write_to_stream(NULL_TOKEN, &request.as_bytes());
             self.waiting_for_db_resp = true;
             wait_for_resp = true;
         }
 
         if self.timeout != 0 {
-            self.write_to_stream(NULL_TOKEN, "PING\r\n");
+            self.write_to_stream(NULL_TOKEN, "PING\r\n".as_bytes());
             self.waiting_for_ping_resp = true;
             wait_for_resp = true;
         }
@@ -376,8 +377,9 @@ impl SingleBackend {
         }
     }
 
-    pub fn write_message(&mut self,
-        message: &str,
+    pub fn write_message(
+        &mut self,
+        message: &[u8],
         client_token: Token
     ) -> bool {
         match self.status {
@@ -530,12 +532,12 @@ impl SingleBackend {
     fn write_to_stream(
         &mut self,
         client_token: Token,
-        message: &str,
+        message: &[u8],
     ) {
-        debug!("Write to backend {:?} {}: {}", &self.token, self.host, &message);
+        debug!("Write to backend {:?} {}: {:?}", &self.token, self.host, &message);
         match self.socket {
             Some(ref mut socket) => {
-                let _ = socket.write(&message.as_bytes());
+                let _ = socket.write(&message);
             }
             None => panic!("No connection to backend"),
         }

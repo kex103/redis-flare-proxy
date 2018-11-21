@@ -18,27 +18,27 @@ pub enum HashFunction {
     Jenkins,
 }
 
-pub fn hash(hash_function: &HashFunction, key: &str) -> usize {
+pub fn hash(hash_function: &HashFunction, key: &[u8]) -> usize {
     match hash_function {
         HashFunction::Crc16 => {
-            crc16::checksum_x25(key.as_bytes()) as usize
+            crc16::checksum_x25(key) as usize
         }
         HashFunction::Crc32 => {
-            crc32::checksum_ieee(key.as_bytes()) as usize
+            crc32::checksum_ieee(key) as usize
         }
         HashFunction::Fnv1a64 => {
             // todo: Verify this is fnv1a_64, and not fnv1_64
             let mut hasher = FnvHasher::default();
-            hasher.write(key.as_bytes());
+            hasher.write(key);
             hasher.finish() as usize
         }
         HashFunction::Murmur => {
             let mut s: MurmurHasher = Default::default();
-            s.write(key.as_bytes());
+            s.write(key);
             s.finish() as usize
         }
         HashFunction::Jenkins => {
-            spooky_hash::spooky(key.as_bytes()) as usize
+            spooky_hash::spooky(key) as usize
         }
     }
 }
@@ -90,17 +90,7 @@ fn test_hashing_speed() {
     let start = Instant::now();
 
     for _ in 1..2000000 {
-        hash(&HashFunction::Fnv1a64, &a);
+        hash(&HashFunction::Fnv1a64, &a.as_bytes());
     }
     info!("Time spent with default: {:?}", Instant::now() - start);
-    let start = Instant::now();
-    for _ in 1..2000000 {
-        fnv1a(a.clone());
-    }
-    info!("Time spent with fnv1a: {:?}", Instant::now() - start);
-    let start = Instant::now();
-    for _ in 1..2000000 {
-        fnv1a2(a.clone());
-    }
-    info!("Time spent with fnv1a2: {:?}", Instant::now() - start);
 }

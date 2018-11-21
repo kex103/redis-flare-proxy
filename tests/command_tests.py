@@ -14,17 +14,33 @@ class CommandTests(TestUtil):
         r = redis.Redis(port=1533, socket_timeout=1)
 
         # Test scripting commands
-        # TODO: Implement scripting for single keys.
         script = "return redis.call('set',KEYS[1],ARGV[1])"
-        command = "EVAL \"{}\" key10 value10"
-        self.assertEquals(r.execute_command(command), True)
+        # execute_command doesn't seem to work with eval properly as a single string.
+        self.assertEquals(r.eval(script, 1, 'key10', 'value10'), 'OK')
         self.assertEquals(r.get('key10'), 'value10')
-        #self.assertEquals(r.execute_command("EVALSHA key10"), 1)
+
+        # Verify scripts with more than 1 keys are rejected.
+        script = "return 3"
+        try:
+            self.assertEquals(r.eval(script, 2, 'key10', 'key11'), True)
+            self.fail("Expected response error did not occur")
+        except redis.ResponseError, e:
+            self.assertEquals(str(e), "ERROR: Scripts must have 1 key")
+
+        # Verify scripts with multi lines
+        script = "local a = redis.call('set',KEYS[1],ARGV[1])\r\nreturn 3"
+        self.assertEquals(r.eval(script, 1, 'key10', 'value11'), 3)
+        self.assertEquals(r.get('key10'), 'value11')
+
+        # Remaining commands are unimplemented.
+        #script = "local a = redis.call('set',KEYS[1],ARGV[1])\r\nreturn 3"
+        #self.assertEquals(r.execute_command("SCRIPT LOAD \"{}\"".format(script)), 'cb4332')
+        #self.assertEquals(r.execute_command("EVALSHA cb4332 key10 value12"), 3)
+        #self.assertEquals(r.get('key10'), 'value12')
         #self.assertEquals(r.execute_command("SCRIPT DEBUG key10"), 1)
         #self.assertEquals(r.execute_command("SCRIPT EXISTS key10"), 1)
         #self.assertEquals(r.execute_command("SCRIPT FLUSH key10"), 1)
         #self.assertEquals(r.execute_command("SCRIPT KILL key10"), 1)
-        #self.assertEquals(r.execute_command("SCRIPT LOAD key10"), 1)
 
     def test_redis_commands(self):
         self.start_redis_server(6381)

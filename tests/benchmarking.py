@@ -44,8 +44,11 @@ class BenchmarkProxy(TestUtil):
     def start_proxy_with_profiling(self, config_path):
         log_file = "tests/log/{}.log".format(self.id())
         log_out = open("./tests/log/{}.log.stdout".format(self._testMethodName), 'w')
-        args = ["-c {}".format(config_path),
-            "-l ERROR"]
+        args = [
+            "-c {}".format(config_path),
+            "-l DEBUG",
+            "-o kex.out"
+        ]
         env = os.environ.copy()
         env['RUST_BACKTRACE'] = '1'
         process = subprocess.Popen(["cargo", "profiler", "callgrind", "--release", "--bin", "target/release/redflareproxy", "--"] + args, stdout=log_out, stderr=subprocess.STDOUT, env=env)
@@ -103,7 +106,7 @@ class BenchmarkProxy(TestUtil):
         proxy_proc = self.start_proxy_with_profiling(TestUtil.script_dir() + "/conf/timeout1.toml")
         proc.wait()
         r = redis.Redis(port=1530)
-        r.shutdown()
+        r.execute_command("SHUTDOWN")
         proxy_proc.wait()
 
     def test_benchmark_single_pool(self):

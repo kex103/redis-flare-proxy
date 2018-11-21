@@ -419,7 +419,7 @@ impl RedFlareProxy {
 
     fn handle_client_socket(&mut self, token: ClientToken) {
         let mut switching_config = false;
-        let command = {
+        let request = {
             let client_stream = match self.admin.client_sockets.get_mut(&token) {
                 Some(stream) => stream,
                 None => {
@@ -429,8 +429,8 @@ impl RedFlareProxy {
             };
             parse_redis_command(client_stream)
         };
-        debug!("RECEIVED COMMAND: {}", command);
-        let mut lines = command.lines();
+        debug!("RECEIVED COMMAND: {}", request);
+        let mut lines = request.lines();
         let current_line = lines.next();
         let res = match current_line {
             None => {

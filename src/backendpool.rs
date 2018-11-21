@@ -132,11 +132,11 @@ impl BackendPool {
 
     // Based on the given command, determine which Backend to use, if any.
     // We support Ketama, Modula, and Random.
-    pub fn shard(&mut self, command: &String) -> Result<&mut Backend, RedisError> {
+    pub fn shard(&mut self, command: &[u8]) -> Result<&mut Backend, RedisError> {
         let key = match extract_key(command) {
             Ok(key) => key,
-            Err(_) => {
-                return Err(RedisError::UnsupportedCommand);
+            Err(err) => {
+                return Err(err);
             }
         };
         let tag = get_tag(key, &self.config.hash_tag);
@@ -154,7 +154,7 @@ impl BackendPool {
                 // TODO: Determine # of replicas. Most likely it's just the weight.
                 // TODO: Check if there's any discrepancy between this key and twemproxy.
             }
-            let hashed_token = consistent_hash.get(tag.as_bytes()).unwrap().token;
+            let hashed_token = consistent_hash.get(tag).unwrap().token;
             return Ok(self.backend_map.get_mut(&hashed_token).unwrap());
         }
 
@@ -277,17 +277,17 @@ impl BackendPool {
 
         // 1. Pull command from client.
         let client_request = {
-            let mut buf = String::new();
+            let mut buf = Vec::with_capacity(16384);
             match self.client_sockets.get_mut(&client_token) {
                 Some(stream) => {
-                    let result = stream.read_to_string(&mut buf);
-                    debug!("Read from client:\n{} ({})", buf, buf.len());
+                    let result = stream.read_to_end(&mut buf);
+                    debug!("Read from client:\n{:?} ({})", std::str::from_utf8(&buf), buf.len());
                     match result {
                         Ok(_) => {
                         }
                         Err(reason) => {
                             if buf.len() == 0 {
-                                error!("Useless Error?: {}, {}", reason, buf);
+                                error!("Useless Error?: {}, {:?}", reason, buf);
                             }
                         }
                     }
@@ -322,6 +322,9 @@ impl BackendPool {
             }
             Err(RedisError::UnsupportedCommand) => {
                 err_resp = Some("-ERROR: Unsupported command\r\n".to_owned());
+            }
+            Err(RedisError::InvalidScript) => {
+                err_resp = Some("-ERROR: Scripts must have 1 key\r\n".to_owned());
             }
             Err(_reason) => {
                 debug!("Failed to shard: reason: {:?}", _reason);
@@ -364,14 +367,14 @@ use cluster_backend::init_logging;
 #[test]
 fn test_hashtag() {
     init_logging();
-    assert_eq!(get_tag("/derr/der", &"/".to_string()), "derr".to_string());
-    assert_eq!(get_tag("derr/der", &"/".to_string()), "derr/der".to_string());
-    assert_eq!(get_tag("derr<der>", &"<>".to_string()), "der".to_string());
-    assert_eq!(get_tag("der/r/der", &"//".to_string()), "r".to_string());
-    assert_eq!(get_tag("dberadearb", &"ab".to_string()), "dear".to_string());
+    assert_eq!(get_tag(b"/derr/der", &"/".to_string()), b"derr");
+    assert_eq!(get_tag(b"derr/der", &"/".to_string()), b"derr/der");
+    assert_eq!(get_tag(b"derr<der>", &"<>".to_string()), b"der");
+    assert_eq!(get_tag(b"der/r/der", &"//".to_string()), b"r");
+    assert_eq!(get_tag(b"dberadearb", &"ab".to_string()), b"dear");
 }
 
-fn get_tag<'a>(key: &'a str, tags: &String) -> &'a str {
+fn get_tag<'a>(key: &'a [u8], tags: &String) -> &'a [u8] {
     if tags.len() == 0 {
         return key;
     }
@@ -384,12 +387,12 @@ fn get_tag<'a>(key: &'a str, tags: &String) -> &'a str {
     let mut parsing_tag = false;
     let mut beginning = 0;
     let mut index = 0;
-    for cha in key.chars() {
-        if !parsing_tag && cha == a {
+    for &cha in key {
+        if !parsing_tag && cha == a as u8 {
             parsing_tag = true;
             beginning = index + 1;
         }
-        else if parsing_tag && cha == b {
+        else if parsing_tag && cha == b as u8 {
             return key.get(beginning..index).unwrap();
         }
         index += 1;
