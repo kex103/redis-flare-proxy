@@ -323,8 +323,7 @@ impl SingleBackend {
         // Get rid of first queue.
         self.queue.pop_front();
 
-        if head.0 == NULL_TOKEN && self.waiting_for_ping_resp {
-            // TODO: May want to do this check for db or auth requests, too.
+        if head.0 == NULL_TOKEN && (self.waiting_for_db_resp || self.waiting_for_auth_resp || self.waiting_for_ping_resp) {
             self.change_state(BackendStatus::DISCONNECTED);
             self.connect();
 

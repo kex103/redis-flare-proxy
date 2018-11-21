@@ -14,7 +14,7 @@ class TimeoutTests(TestUtil):
 
     def test_single_backend_failed_timeout(self):
         self.start_redis_server(6381)
-        self.start_delayer(6380, 6381, 101)
+        self.start_delayer(6380, 6381, 110)
         self.start_proxy("tests/conf/timeout1.toml")
 
         TestUtil.verify_redis_error(1531, "ERROR: Not connected")

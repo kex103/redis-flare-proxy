@@ -53,7 +53,7 @@ class TestRedFlareProxy(TestUtil):
         self.start_redis_server(6380)
         self.start_redis_server(6383)
         self.start_redis_server(6384)
-        self.start_delayer(6382, 6380, 101)
+        self.start_delayer(6382, 6380, 110)
         self.start_proxy("tests/conf/multishard2.toml")
 
         TestUtil.verify_redis_connection(1533)
