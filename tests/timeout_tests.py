@@ -27,7 +27,7 @@ class TimeoutTests(TestUtil):
         TestUtil.verify_redis_connection(1531)
 
         # Set a long delay, so that all requests to the backend will time out.
-        conn_to_delayer = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        conn_to_delayer = socket.socket(socket.AF_INET)
         conn_to_delayer.connect(("0.0.0.0", 6382))
         conn_to_delayer.sendall("SETDELAY 401")
         # Verify that requests time out. After the 3rd failure, the backend is blacklisted.
@@ -37,12 +37,13 @@ class TimeoutTests(TestUtil):
         TestUtil.verify_redis_error(1531, "ERROR: Not connected")
         TestUtil.verify_redis_error(1531, "ERROR: Not connected")
         conn_to_delayer.sendall("BLOCK_NEW_CONNS 750")
-        time.sleep(1)
+        # Wait an extra long time, to test that the first ping times out. A second ping should be sent.
+        time.sleep(4)
 
         # Set a short delay, so requests will stop timing out.
         conn_to_delayer.sendall("SETDELAY 2")
         # Wait a second, to give time for the proxy to detect that the backend is available again.
-        time.sleep(1)
+        time.sleep(2)
         # Verify that requests succeed now.
         TestUtil.verify_redis_connection(1531)
         TestUtil.verify_redis_connection(1531)

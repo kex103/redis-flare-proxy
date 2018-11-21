@@ -7,12 +7,21 @@ import signal
 import sys
 import traceback
 import datetime
+import threading
 
 def log(msg):
     ts = time.time()
     st = datetime.datetime.fromtimestamp(ts).strftime('%Y-%m-%d %H:%M:%S.%f')
     print "{}: {}".format(st, msg)
     sys.stdout.flush()
+
+def delayed_send(stream, message, delay):
+    time.sleep(delay)
+    log("Finished sleeping: Sending {}".format(message))
+    try:
+        stream.send(message)
+    except:
+        pass
 
 server_socket = None
 start = time.time()
@@ -79,17 +88,24 @@ try:
             block_end = None
             start_server_socket()
         for read in readable:
-            log("Readable!")
+            log("Readable! {}".format(read))
             if read == output_stream:
                 data = output_stream.recv(1024)
                 log("Message received: {}".format(data))
-                time.sleep(delay)
-                log("Delay finished")
-                try:
-                    input_stream.send(data)
-                except Exception as e:
-                    log("Failed to send data {} to input stream. Reason: {}".format(data, repr(e)))
-                    input_stream = None
+                # Should sleep in a separate thread.
+                t = threading.Thread(target=delayed_send, args=(input_stream, data, delay))
+                t.start()
+               # log("Delay finished")
+              #  if not input_stream:
+              #      log("Skipped sending to client because gone")
+               #     continue
+              #  try:
+              #      input_stream.send(data)
+               # except Exception as e:
+                 #   log("Failed to send data {} to input stream. Reason: {}".format(data, repr(e)))
+                #    input_stream.close()
+                #    clients.remove(input_stream)
+                #    input_stream = None
             elif read == input_stream:
                 data = input_stream.recv(1024)
                 output_stream.send(data)
@@ -106,11 +122,19 @@ try:
                 log("Got a new client!")
                 server_socket.listen(5)
             elif read == admin_socket:
+                log("Got a new admin client!")
                 admin_stream, _ = admin_socket.accept()
                 clients.append(admin_stream)
             elif read == admin_stream:
+                log("Got something on admin")
                 data = admin_stream.recv(1024)
-                log("Got an admin message: {}".format(data))
+                if not data:
+                    log("Terminating admin stream early")
+                    admin_stream.close()
+                    clients.remove(admin_stream)
+                    admin_stream = None
+                    continue
+                log("Got an admin message: {} {}".format(data, admin_stream))
                 words = data.split()
                 if not words:
                     continue
@@ -122,6 +146,16 @@ try:
                     block_end = time.time() + block_time
                     server_socket.close()
                     server_socket = None
+            else:
+                log("Some ex-client?")
+                try:
+                    clients.remove(read)
+                except:
+                    pass
+                try:
+                    read.close()
+                except:
+                    pass
 
         for error in errorable:
             log("Error!")

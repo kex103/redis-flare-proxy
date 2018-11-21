@@ -322,6 +322,13 @@ impl SingleBackend {
         // Get rid of first queue.
         self.queue.pop_front();
 
+        if head.0 == NULL_TOKEN && self.waiting_for_ping_resp {
+            // TODO: May want to do this check for db or auth requests, too.
+            self.change_state(BackendStatus::DISCONNECTED);
+            self.connect();
+
+        }
+
         self.write_to_client(head.0, "-ERR Proxy timed out\r\n");
 
         if &target_timestamp == time {
@@ -534,7 +541,7 @@ impl SingleBackend {
         client_token: Token,
         message: &[u8],
     ) {
-        debug!("Write to backend {:?} {}: {:?}", &self.token, self.host, &message);
+        debug!("Write to backend {:?} {}: {:?}", &self.token, self.host, std::str::from_utf8(&message));
         match self.socket {
             Some(ref mut socket) => {
                 let _ = socket.write(&message);
