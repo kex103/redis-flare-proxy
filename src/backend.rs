@@ -1,7 +1,7 @@
 use bufreader::BufReader;
 use redflareproxy::{StreamType, NULL_TOKEN, Subscriber};
 use config::BackendConfig;
-use backendpool::{BackendPool, parse_redis_response};
+use backendpool::{BackendPool};
 use mio::*;
 use mio_more::timer::{Timer, Builder};
 use mio::tcp::{TcpStream};
@@ -15,6 +15,8 @@ use std::cell::RefCell;
 use std::rc::Rc;
 use cluster_backend::{ClusterBackend};
 use fxhash::FxHashMap as HashMap;
+use redisprotocol::extract_redis_command;
+use redisprotocol::RedisError;
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum BackendStatus {
@@ -329,7 +331,7 @@ impl SingleBackend {
 
         }
 
-        self.write_to_client(head.0, "-ERR Proxy timed out\r\n");
+        self.write_to_client(head.0, b"-ERR Proxy timed out\r\n");
 
         if &target_timestamp == time {
             if  self.status != BackendStatus::READY {
@@ -367,7 +369,7 @@ impl SingleBackend {
             match possible_token {
                 Some((NULL_TOKEN, _)) => {}
                 Some((client_token, _)) => {
-                    self.write_to_client(client_token, "-ERR: Unavailable backend.\r\n");
+                    self.write_to_client(client_token, b"-ERR: Unavailable backend.\r\n");
                 }
                 None => break,
             }
@@ -414,35 +416,38 @@ impl SingleBackend {
 
         // Read all responses if there are any left.
         while self.queue.len() > 0 {
-            let response = self.get_backend_response();
-            if response.len() == 0 {
+            let a = route_backend_response(
+                &mut self.socket,
+                &mut self.written_sockets, 
+                &mut self.parent,
+                &mut self.queue,
+                &mut self.token,
+                &mut self.status,
+                &mut self.waiting_for_auth_resp,
+                &mut self.waiting_for_db_resp,
+                &mut self.waiting_for_ping_resp,
+                &mut unhandled_internal_responses,
+            );
+            if a.unwrap() == false {
                 return unhandled_internal_responses;
-            }
-            let client_token = match self.queue.pop_front() {
-                Some((client_token, _)) => client_token,
-                None => panic!("No more client token in backend queue, even though queue length was >0 just now!"),
             };
-            self.write_to_client(client_token, &response);
-            if client_token == NULL_TOKEN {
-                self.handle_internal_response(response, &mut unhandled_internal_responses);
-            }
         }
         return unhandled_internal_responses;
     }
 
-    fn handle_internal_response(&mut self, response: String, unhandled_queue: &mut VecDeque<String>) {
+    fn handle_internal_response(&mut self, response: &[u8], unhandled_queue: &mut VecDeque<String>) {
         // TODO: Handle the various requirements.
-        if self.waiting_for_auth_resp && response == "+OK\r\n" {
+        if self.waiting_for_auth_resp && response == b"+OK\r\n" {
             self.waiting_for_auth_resp = false;
         }
-        else if self.waiting_for_db_resp && response == "+OK\r\n" {
+        else if self.waiting_for_db_resp && response == b"+OK\r\n" {
             self.waiting_for_db_resp = false;
         }
-        else if self.waiting_for_ping_resp && response == "+PONG\r\n" {
+        else if self.waiting_for_ping_resp && response == b"+PONG\r\n" {
             self.waiting_for_ping_resp = false;
         }
         else {
-            unhandled_queue.push_back(response);
+            unhandled_queue.push_back(std::str::from_utf8(response).unwrap().to_string());
             return;
         }
         if !self.waiting_for_auth_resp && !self.waiting_for_db_resp && !self.waiting_for_ping_resp {
@@ -528,14 +533,14 @@ impl SingleBackend {
         written_sockets.push_back((token, stream_type));
     }
 
-    fn write_to_client(&mut self, client_token: Token, message: &str) {
+    fn write_to_client(&mut self, client_token: Token, message: &[u8]) {
         if client_token == NULL_TOKEN {
             return;
         }
         match self.parent_clients().get_mut(&client_token) {
             Some(stream) => {
                 debug!("Wrote to client {:?}: {:?}", client_token, message);
-                let _ = stream.get_mut().write(&message.as_bytes());
+                let _ = stream.get_mut().write(message);
                 self.register_written_socket(client_token, StreamType::PoolClient);
             }
             _ => panic!("Found listener instead of stream! for clienttoken {:?}", client_token),
@@ -558,10 +563,14 @@ impl SingleBackend {
         let now = Instant::now();
         let timestamp = now + Duration::from_millis(self.timeout as u64);
         self.queue.push_back((client_token, timestamp));
-        if self.queue.len() == 1 && self.timeout != 0 {            let mut timer = create_timer();
+        if self.queue.len() == 1 && self.timeout != 0 {
+            let mut timer = create_timer();
             let _ = timer.set_timeout(Duration::from_millis(self.timeout as u64), true);
             let timer_token = self.get_timeout_token();
-            self.poll_registry.borrow_mut().register(&timer, timer_token, Ready::readable(), PollOpt::edge() | PollOpt::oneshot()).unwrap();
+            match self.poll_registry.borrow_mut().register(&timer, timer_token, Ready::readable(), PollOpt::edge() | PollOpt::oneshot()) {
+                Ok(_) => {}
+                Err(_err) => {error!("KEX: failed to register because unavailable. should fix timer system {:?}", _err);}
+            }
             // need to handle with specific function for token. How to know what token this is?
             // can stuff into sockets. but it'll ahve timer token.
             self.timer = Some(timer);
@@ -569,25 +578,151 @@ impl SingleBackend {
         }
     }
 
-    pub fn get_backend_response(&mut self) -> String {
-        let response;
-        match self.socket {
-            Some(ref mut stream) => response = parse_redis_response(stream),
-            _ => panic!("Found listener instead of stream!"),
-        }
-        debug!("Read from backend: {}", response);
-        if response.len() == 0 {
-            debug!("Completely empty string response from backend {:?}!", self.socket);
-            // TODO: remote connection can disconnect, and redflareproxy won't' detect
-            // that it's down until a client attempts to hit it.
-            // Should we listen for peer close to mark it early?
-            return response;
-        }
-        return response
-    }
-
     fn get_timeout_token(&self) -> Token {
         backend_to_timeout_token(&self.token)
+    }
+}
+
+fn handle_internal_response(token: &Token, status: &mut BackendStatus, waiting_for_auth_resp: &mut bool, waiting_for_db_resp: &mut bool, waiting_for_ping_resp: &mut bool, response: &[u8], unhandled_queue: &mut VecDeque<String>) {
+    // TODO: Handle the various requirements.
+    if *waiting_for_auth_resp && response == b"+OK\r\n" {
+        *waiting_for_auth_resp = false;
+    }
+    else if *waiting_for_db_resp && response == b"+OK\r\n" {
+        *waiting_for_db_resp = false;
+    }
+    else if *waiting_for_ping_resp && response == b"+PONG\r\n" {
+        *waiting_for_ping_resp = false;
+    }
+    else {
+        unhandled_queue.push_back(std::str::from_utf8(response).unwrap().to_string());
+        return;
+    }
+    if !*waiting_for_auth_resp && !*waiting_for_db_resp && !*waiting_for_ping_resp {
+        change_state(token, status, BackendStatus::READY);
+    }
+}
+
+fn change_state(token: &Token, status: &mut BackendStatus, target_state: BackendStatus) -> bool {
+    // TODO: Rethink change state flow.
+    if *status == target_state {
+        return true;
+    }
+    let _prev_status = *status;
+    match (*status, target_state) {
+        // called when trying to establish a connection to backend.
+        (BackendStatus::DISCONNECTED, BackendStatus::CONNECTING) => {}
+         // happens when connection to backend has been established and is writable.
+        (BackendStatus::CONNECTING, BackendStatus::CONNECTED) => {}
+        // Happens when writable connection is validated with a PING (if timeout is enabled)
+        (BackendStatus::CONNECTED, BackendStatus::READY) => {}
+        (BackendStatus::READY, BackendStatus::CONNECTED) => { return true; }
+        // Happens when the establishing connection to backend has timed out.
+        (BackendStatus::CONNECTING, BackendStatus::DISCONNECTED) => {}
+        // happens when host fails initializing PING
+        (BackendStatus::CONNECTED, BackendStatus::DISCONNECTED) => {}
+        // happens when host has been blacked out from too many failures/timeouts.
+        (BackendStatus::READY, BackendStatus::DISCONNECTED) => {}
+        _ => {
+            debug!("Backend {:?} failed to change state from {:?} to {:?}", token, status, target_state);
+            panic!("Failure to change states"); //return false;
+        }
+    }
+    debug!("Backend {:?} changed state from {:?} to {:?}", token, status, target_state);
+    *status = target_state;
+    return true;
+}
+
+fn write_to_client(written_sockets: & *mut VecDeque<(Token, StreamType)>, parent: & *mut BackendPool, client_token: Token, message: &[u8], socket: &mut Option<BufReader<TcpStream>>) {
+    if client_token == NULL_TOKEN {
+        return;
+    }
+    match parent_clients(parent).get_mut(&client_token) {
+        Some(stream) => {
+            debug!("Wrote to client {:?}: {:?}", client_token, message);
+            let _ = stream.get_mut().write(message);
+            register_written_socket(written_sockets, client_token, StreamType::PoolClient);
+        }
+        _ => panic!("Found listener instead of stream! for clienttoken {:?}", client_token),
+    }
+}
+
+fn parent_clients(parent: & *mut BackendPool) -> &mut HashMap<Token, BufReader<TcpStream>> {
+    unsafe {
+        let parent_pool = &mut **parent;
+        return &mut parent_pool.client_sockets;
+    }
+}
+
+fn register_written_socket(written_sockets: & *mut VecDeque<(Token, StreamType)>, token: Token, stream_type: StreamType) {
+    let written_sockets = unsafe {
+        &mut **written_sockets as &mut VecDeque<(Token, StreamType)>
+    };
+    written_sockets.push_back((token, stream_type));
+}
+
+fn route_backend_response(
+    stream: &mut Option<BufReader<TcpStream>>,
+    written_sockets: & *mut VecDeque<(Token, StreamType)>,
+    parent: & *mut BackendPool,
+    queue: &mut VecDeque<(Token, Instant)>,
+    token: &mut Token,
+    status: &mut BackendStatus,
+    waiting_for_auth_resp: &mut bool,
+    waiting_for_db_resp: &mut bool,
+    waiting_for_ping_resp: &mut bool,
+    unhandled_internal_responses: &mut VecDeque<String>,
+) -> Result<bool, RedisError> {
+    match stream {
+        Some(ref mut s) => {
+            let len = {
+                let buf = match s.fill_buf() {
+                    Ok(b) => b,
+                    Err(_err) => {
+                        return Ok(false);
+                    }
+                };
+
+                debug!("Read from backend: {:?}", std::str::from_utf8(buf));
+                let response = try!(extract_redis_command(buf));
+                if response.len() == 0 {
+                    return Ok(false);
+                }
+
+                let client_token = match queue.pop_front() {
+                    Some((client_token, _)) => client_token,
+                    None => panic!("No more client token in backend queue, even though queue length was >0 just now!"),
+                };
+
+                if client_token == NULL_TOKEN {
+                    handle_internal_response(
+                        token,
+                        status,
+                        waiting_for_auth_resp,
+                        waiting_for_db_resp,
+                        waiting_for_ping_resp,
+                        response,
+                        unhandled_internal_responses
+                    );
+                } else {
+
+                    match parent_clients(parent).get_mut(&client_token) {
+                        Some(stream) => {
+                            debug!("Wrote to client {:?}: {:?}", client_token, response);
+                            let _ = stream.get_mut().write(response);
+                            register_written_socket(written_sockets, client_token, StreamType::PoolClient);
+                        }
+                        None => panic!("Found listener instead of stream! for clienttoken {:?}", client_token),
+                    }
+                }
+                response.len()
+            };
+            s.consume(len);
+
+
+            return Ok(true);
+        }
+        None => panic!("No backend stream!"),
     }
 }
 
@@ -666,3 +801,11 @@ fn create_timer() -> Timer<bool> {
     builder = builder.tick_duration(Duration::from_millis(10));
     builder.build()
 }
+
+// TODO: Rewrite this
+pub fn parse_redis_response(stream: &mut BufReader<TcpStream>) -> Result<&[u8], RedisError> {
+    let buf = stream.fill_buf().unwrap();
+
+    return extract_redis_command(buf);
+}
+

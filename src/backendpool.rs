@@ -359,7 +359,7 @@ impl BackendPool {
                 let _ = stream.get_mut().write(&message.into_bytes()[..]);
                 written_sockets.push_back((client_token.clone(), StreamType::PoolClient));
             }
-            _ => panic!("Found listener instead of stream!"),
+            _ => panic!("No client remaining for pool"),
         }
     }
 }
@@ -403,7 +403,16 @@ fn get_tag<'a>(key: &'a [u8], tags: &String) -> &'a [u8] {
 }
 
 // TODO: Rewrite this
-pub fn parse_redis_response(stream: &mut BufReader<TcpStream>) -> String {
+pub fn parse_redis_response(stream: &mut BufReader<TcpStream>) -> &[u8] {
+    let len = stream.buffer().len();
+    stream.consume(len);
+    debug!("Stream info: {:?}", stream);
+    let _ = stream.fill_buf();
+    // fill buff, then figure out how many bytes the message takes, then send only a slice of that.
+    // when to consume it though? When it is sent, it is done. that happens when it's written to.
+    debug!("Stream info after: {:?}", stream);
+    return stream.buffer();
+    /*
     let mut string = String::new();
     let _ = stream.read_line(&mut string);
     match string.chars().next() {
@@ -454,7 +463,7 @@ pub fn parse_redis_response(stream: &mut BufReader<TcpStream>) -> String {
         }
         _ => {}
     }
-    string
+    string*/
 }
 
 pub fn _parse_redis_response(stream: &mut BufReader<TcpStream>) -> &str {

@@ -96,7 +96,7 @@ pub fn iteration1(bytes: &[u8]) -> Result<usize, RedisError> {
     }
     index += 1;*/
 
-    index += try!(skip_past_eol(&mut bytes_iter));
+    try!(skip_past_eol(&mut bytes_iter, &mut index));
     index += 1;
     Ok(index)
 }
@@ -121,21 +121,20 @@ pub fn iteration2(bytes: &[u8]) -> Result<usize, RedisError> {
     Ok(index)
 }
 
-fn skip_past_eol(iter: &mut Iter<u8>) -> Result<usize, RedisError> {
-    let mut index = 0;
+fn skip_past_eol(iter: &mut Iter<u8>, index: &mut usize) -> Result<(), RedisError> {
     let mut b = match iter.next() {
         Some(byte) => *byte,
         None => { return Err(RedisError::Unknown); }
     };
     while b != '\n' as u8 {
-        index += 1;
+        *index += 1;
         b = match iter.next() {
             Some(byte) => *byte,
             None => { return Err(RedisError::Unknown); }
         };
     }
     // return number of steps forward taken.
-    return Ok(index);
+    return Ok(());
 }
 
 fn skip_bytes(num_bytes: usize, iter: &mut Iter<u8>, index: &mut usize) -> Result<u8, RedisError> {
@@ -188,6 +187,141 @@ fn parse_num_bytes(first_byte: u8, iter: &mut Iter<u8>, index: &mut usize, bytes
     return Ok(num);
 }
 
+fn parse_num(iter: &mut Iter<u8>, index: &mut usize, bytes: &[u8]) -> Result<isize, RedisError> {
+    // parse the integer.
+    let start_index = *index;
+    let mut b = try!(next_byte(iter, index));
+    while b != '\n' as u8 {
+        *index += 1;
+        b = match iter.next() {
+            Some(byte) => *byte,
+            None => { return Err(RedisError::Unknown); }
+        };
+    }
+    let raw_num = unsafe {
+        bytes.get_unchecked(start_index..*index-2)
+    };
+    let num = match std::str::from_utf8(raw_num) {
+        Ok(n) => {
+            match n.parse::<isize>() {
+                Ok(n) => n,
+                Err(_err) => { return Err(RedisError::InvalidProtocol); }
+            }
+        }
+        Err(_error) => { return Err(RedisError::InvalidProtocol); }
+    };
+    return Ok(num);
+}
+
+
+#[test]
+fn test_extract_redis_command() {
+    init_logging();
+    let a = "$-1\r\naeras".to_string();
+    let resp = extract_redis_command(&a.as_bytes());
+    assert_eq!(resp, Ok("$-1\r\n".as_bytes()));
+
+    let a = "+THREE\r\naeras".to_string();
+    let resp = extract_redis_command(&a.as_bytes());
+    assert_eq!(resp, Ok("+THREE\r\n".as_bytes()));
+
+    let a = "-FERAC\r\ndera".to_string();
+    let resp = extract_redis_command(&a.as_bytes());
+    assert_eq!(resp, Ok("-FERAC\r\n".as_bytes()));
+
+    let a = ":1234567\r\ndera".to_string();
+    let resp = extract_redis_command(&a.as_bytes());
+    assert_eq!(resp, Ok(":1234567\r\n".as_bytes()));
+
+    let a = "$4\r\nTHRE\r\ndera".to_string();
+    let resp = extract_redis_command(&a.as_bytes());
+    assert_eq!(resp, Ok("$4\r\nTHRE\r\n".as_bytes()));
+
+    let a = "*3\r\n+dera\r\n$2\r\nab\r\n*2\r\n$4\r\nBLAR\r\n:34\r\nadaerare".to_string();
+    let resp = extract_redis_command(&a.as_bytes());
+    assert_eq!(resp, Ok("*3\r\n+dera\r\n$2\r\nab\r\n*2\r\n$4\r\nBLAR\r\n:34\r\n".as_bytes()));
+}
+
+pub fn extract_redis_command(bytes: &[u8]) -> Result<&[u8], RedisError> {
+    let mut bytes_iter = bytes.iter();
+    let mut index = 0;
+    try!(parse_redis_request(&mut bytes_iter, &mut index, bytes));
+    return unsafe { Ok(bytes.get_unchecked(0..index)) };
+    /*
+    match *bytes_iter.next().unwrap() as char {
+        '+' =>  {
+            try!(skip_past_eol(&mut bytes_iter, &mut index));
+            return unsafe {
+                Ok(bytes.get_unchecked(0..index+1))
+            }
+        }
+        '-' =>  {
+            try!(skip_past_eol(&mut bytes_iter, &mut index));
+            return unsafe {
+                Ok(bytes.get_unchecked(0..index+1))
+            };
+        }
+        ':' =>  {
+            try!(skip_past_eol(&mut bytes_iter, &mut index));
+            return unsafe {
+                Ok(bytes.get_unchecked(0..index+1))
+            }
+        }
+        '$' => {
+            let num = try!(parse_num(&mut bytes_iter, &mut index, bytes));
+            return unsafe {
+                Ok(bytes.get_unchecked(0..index+num+2))
+            };
+        }
+        '*' => {
+            let num = try!(parse_num(&mut bytes_iter, &mut index, bytes));
+            for _ in 0..num {
+            }
+            panic!("not done");
+
+        }
+        _ => { return Err(RedisError::InvalidProtocol); }
+    }*/
+}
+fn parse_redis_request(bytes_iter: &mut Iter<u8>, index: &mut usize, bytes: &[u8]) -> Result<(), RedisError> {
+    *index += 1;
+    match *bytes_iter.next().unwrap() as char {
+        '+' =>  {
+            try!(skip_past_eol(bytes_iter, index));
+            *index += 1;
+            return Ok(());
+        }
+        '-' =>  {
+            try!(skip_past_eol(bytes_iter, index));
+            *index += 1;
+            return Ok(());
+        }
+        ':' =>  {
+            try!(skip_past_eol(bytes_iter, index));
+            *index += 1;
+            return Ok(());
+        }
+        '$' => {
+            let num = try!(parse_num(bytes_iter, index, bytes));
+            if num < 0 {
+                return Ok(());
+            }
+            try!(skip_bytes(num as usize + 1, bytes_iter, index));
+            return Ok(());
+        }
+        '*' => {
+            let num = try!(parse_num(bytes_iter, index, bytes));
+            for _ in 0..num {
+                debug!("Finished one array el {:?}", index);
+                try!(parse_redis_request(bytes_iter, index, bytes));
+            }
+            return Ok(());
+            
+        }
+        _ => { return Err(RedisError::InvalidProtocol); }
+    }
+}
+
 pub fn extract_key(bytes: &[u8]) -> Result<&[u8], RedisError> {
     if bytes[0] == '*' as u8 {
         // then it is standard redis protcol.
@@ -195,7 +329,7 @@ pub fn extract_key(bytes: &[u8]) -> Result<&[u8], RedisError> {
         let mut bytes_iter = bytes.iter();
 
         // skip 1
-        index += try!(skip_past_eol(&mut bytes_iter));
+        try!(skip_past_eol(&mut bytes_iter, &mut index));
         let byte = try!(next_byte(&mut bytes_iter, &mut index));
         let num = try!(parse_num_bytes(byte, &mut bytes_iter, &mut index, bytes));
 
