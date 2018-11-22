@@ -322,7 +322,7 @@ impl RedFlareProxy {
             Subscriber::PoolClient(pool_token) => {
                 debug!("PoolClient {:?} for Pool {:?}", token, pool_token);
                 match self.backendpools.get_mut(&pool_token) {
-                    Some(pool) => pool.handle_client_readable(&mut self.written_sockets, token),
+                    Some(pool) => { pool.handle_client_readable(&mut self.written_sockets, token); }
                     None => error!("FxHashMap says it has token but it really doesn't!"),
                 }
             }

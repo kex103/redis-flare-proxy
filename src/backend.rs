@@ -435,26 +435,6 @@ impl SingleBackend {
         return unhandled_internal_responses;
     }
 
-    fn handle_internal_response(&mut self, response: &[u8], unhandled_queue: &mut VecDeque<String>) {
-        // TODO: Handle the various requirements.
-        if self.waiting_for_auth_resp && response == b"+OK\r\n" {
-            self.waiting_for_auth_resp = false;
-        }
-        else if self.waiting_for_db_resp && response == b"+OK\r\n" {
-            self.waiting_for_db_resp = false;
-        }
-        else if self.waiting_for_ping_resp && response == b"+PONG\r\n" {
-            self.waiting_for_ping_resp = false;
-        }
-        else {
-            unhandled_queue.push_back(std::str::from_utf8(response).unwrap().to_string());
-            return;
-        }
-        if !self.waiting_for_auth_resp && !self.waiting_for_db_resp && !self.waiting_for_ping_resp {
-            self.change_state(BackendStatus::READY);
-        }
-    }
-
     pub fn handle_backend_failure(&mut self) {
         self.mark_backend_down();
         self.retry_connect();
@@ -633,20 +613,6 @@ fn change_state(token: &Token, status: &mut BackendStatus, target_state: Backend
     return true;
 }
 
-fn write_to_client(written_sockets: & *mut VecDeque<(Token, StreamType)>, parent: & *mut BackendPool, client_token: Token, message: &[u8], socket: &mut Option<BufReader<TcpStream>>) {
-    if client_token == NULL_TOKEN {
-        return;
-    }
-    match parent_clients(parent).get_mut(&client_token) {
-        Some(stream) => {
-            debug!("Wrote to client {:?}: {:?}", client_token, message);
-            let _ = stream.get_mut().write(message);
-            register_written_socket(written_sockets, client_token, StreamType::PoolClient);
-        }
-        _ => panic!("Found listener instead of stream! for clienttoken {:?}", client_token),
-    }
-}
-
 fn parent_clients(parent: & *mut BackendPool) -> &mut HashMap<Token, BufReader<TcpStream>> {
     unsafe {
         let parent_pool = &mut **parent;
@@ -800,12 +766,5 @@ fn create_timer() -> Timer<bool> {
     let mut builder = Builder::default();
     builder = builder.tick_duration(Duration::from_millis(10));
     builder.build()
-}
-
-// TODO: Rewrite this
-pub fn parse_redis_response(stream: &mut BufReader<TcpStream>) -> Result<&[u8], RedisError> {
-    let buf = stream.fill_buf().unwrap();
-
-    return extract_redis_command(buf);
 }
 

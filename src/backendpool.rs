@@ -1,3 +1,4 @@
+use redisprotocol::extract_redis_command;
 use hash::hash;
 use redflareproxy::BackendToken;
 use redflareproxy::PoolToken;
@@ -11,10 +12,8 @@ use mio::*;
 use mio::tcp::{TcpListener, TcpStream};
 use std::collections::{VecDeque};
 use std::string::String;
-use std::io::{Read, Write, BufRead};
+use std::io::{Write, BufRead};
 use std::time::{Instant};
-use bufstream::BufStream;
-
 use fxhash::FxHashMap as HashMap;
 use fxhash::FxHashMap;
 use conhash::*;
@@ -132,77 +131,6 @@ impl BackendPool {
         return self.backend_map.get_mut(backend_token).unwrap();
     }
 
-    // Based on the given command, determine which Backend to use, if any.
-    // We support Ketama, Modula, and Random.
-    pub fn shard(&mut self, command: &[u8]) -> Result<&mut Backend, RedisError> {
-        let key = match extract_key(command) {
-            Ok(key) => key,
-            Err(err) => {
-                return Err(err);
-            }
-        };
-        let tag = get_tag(key, &self.config.hash_tag);
-
-        // TODO: Also, we want to cache the shardmap building if possible.
-
-        // How does the ConsistentHashing library work?
-        if self.config.distribution == Distribution::Ketama {
-            let mut consistent_hash = conhash::ConsistentHash::new();
-            for i in self.backends.iter() {
-                let backend = self.backend_map.get_mut(i).unwrap();
-                // 40 is pulled to match twemproxy's ketama.
-                consistent_hash.add(&TokenNode {token: i.clone()}, backend.weight * 40);
-                //consistent_hash.add(&TokenNode {token: i.clone()}, backend.weight);
-                // TODO: Determine # of replicas. Most likely it's just the weight.
-                // TODO: Check if there's any discrepancy between this key and twemproxy.
-            }
-            let hashed_token = consistent_hash.get(tag).unwrap().token;
-            return Ok(self.backend_map.get_mut(&hashed_token).unwrap());
-        }
-
-        // Get total size:
-        let mut total_weight = 0;
-        for i in self.backends.iter() {
-            let backend = self.backend_map.get_mut(i).unwrap();
-            if !self.config.auto_eject_hosts || backend.is_available() {
-                total_weight += backend.weight;
-            }
-        }
-
-        let shard: Result<usize, String> = match self.config.distribution {
-            Distribution::Modula => Ok(hash(&self.config.hash_function, &tag) % total_weight), // Should be using key, not command.
-            Distribution::Random => Ok(thread_rng().gen_range(0, total_weight - 1)),
-            _ => panic!("Impossible to hit this with ketama!"),
-        };
-        let mut answer = None;
-        match shard {
-            Ok(shard_no) => {
-                debug!("Sharding command tag to be {}", shard_no);
-                {
-                    let ref backends = self.backends;
-                    let ref mut backend_map = self.backend_map;
-                    for backend_token in backends.iter() {
-                        let backendbogus = backend_map.get_mut(backend_token).unwrap();
-                        if self.config.auto_eject_hosts && !backendbogus.is_available() {
-                            continue;
-                        }
-                        if shard_no >= total_weight - 1 {
-                            answer = Some(backend_token.clone());
-                            break;
-                        }
-                        total_weight -= backendbogus.weight;
-                    }
-                }
-                match answer {
-                    Some(backend_token) => return Ok(self.backend_map.get_mut(&backend_token).unwrap()),
-                    None => panic!("Overflowed when determining shard!"),
-                }
-            }
-            Err(error) => debug!("Received {} while sharding!", error),
-        }
-        Err(RedisError::Unknown)
-    }
-
     pub fn handle_timeout(
         &mut self,
         backend_token: Token,
@@ -274,73 +202,83 @@ impl BackendPool {
         &mut self,
         written_sockets: &mut VecDeque<(Token, StreamType)>,
         client_token: Token
-    ) {
+    ) -> Result<(), RedisError> {
         debug!("Handling client: {:?}", &client_token);
 
         // 1. Pull command from client.
-        let client_request = {
-            let mut buf = Vec::with_capacity(16384);
+        let buf_len = {
             match self.client_sockets.get_mut(&client_token) {
                 Some(stream) => {
-                    let result = stream.read_to_end(&mut buf);
-                    debug!("Read from client:\n{:?} ({})", std::str::from_utf8(&buf), buf.len());
-                    match result {
-                        Ok(_) => {
+                    let (buf_len, err_resp) = {
+                        let buf = match stream.fill_buf() {
+                            Ok(b) => b,
+                            Err(_err) => { &[] }
+                        };
+                        if buf.len() == 0 {
+                            // mark client as closed.
+                            (0, None)
                         }
-                        Err(reason) => {
-                            if buf.len() == 0 {
-                                error!("Useless Error?: {}, {:?}", reason, buf);
+                        else {
+                            debug!("Read from client:\n{:?}", std::str::from_utf8(buf));
+                            let client_request = try!(extract_redis_command(buf));
+                            debug!("Read from client:\n{:?}", std::str::from_utf8(&client_request));
+
+
+                            // TODO: see if redis cluster needs a different token.
+                            // Perhaps the API should be.. write_backend(message_string, token)
+                            // A cluster needs... access to all possible connections.. ?
+                            // Or it has its own.
+                            let mut err_resp = None;
+                            match shard(&self.config, &self.backends, &mut self.backend_map, &client_request) {
+                                Ok(backend) => {
+                                    if !backend.write_message(&client_request, client_token) {
+                                        err_resp = Some("-ERROR: Not connected\r\n".to_owned());
+                                    }
+                                }
+                                Err(RedisError::NoBackend) => {
+                                    err_resp = Some("-ERROR: No backend\r\n".to_owned());
+                                }
+                                Err(RedisError::UnsupportedCommand) => {
+                                    err_resp = Some("-ERROR: Unsupported command\r\n".to_owned());
+                                }
+                                Err(RedisError::InvalidScript) => {
+                                    err_resp = Some("-ERROR: Scripts must have 1 key\r\n".to_owned());
+                                }
+                                Err(_reason) => {
+                                    debug!("Failed to shard: reason: {:?}", _reason);
+                                }
                             }
+                            (client_request.len(), err_resp)
+                        }
+                    };
+                    stream.consume(buf_len);
+
+
+                    match err_resp {
+                        Some(resp) => {
+                            debug!("Wrote to client {:?}: {:?}", client_token, resp);
+                            let _ = stream.get_mut().write(&resp.into_bytes()[..]);
+                            written_sockets.push_back((client_token.clone(), StreamType::PoolClient));
+                        }
+                        None => {
                         }
                     }
+                    debug!("All done handling client!");
+                    buf_len
+
+
                 }
                 None => {
                     error!("Handle client called for expired socket!");
+                    return Ok(());
                 }
             }
-            buf
         };
-        // 1b. Handle client closing if it was just an empty message.
-        if client_request.len() == 0 {
+        if buf_len == 0 {
             self.client_sockets.remove(&client_token);
-            // TODO: Clean up references to client token in redflareproxy?
-            info!("Closing client socket");
-            return;
+            return Ok(());
         }
-
-        // TODO: see if redis cluster needs a different token.
-        // Perhaps the API should be.. write_backend(message_string, token)
-        // A cluster needs... access to all possible connections.. ?
-        // Or it has its own.
-        let mut err_resp = None;
-        match self.shard(&client_request) {
-            Ok(backend) => {
-                if !backend.write_message(&client_request, client_token) {
-                    err_resp = Some("-ERROR: Not connected\r\n".to_owned());
-                }
-            }
-            Err(RedisError::NoBackend) => {
-                err_resp = Some("-ERROR: No backend\r\n".to_owned());
-            }
-            Err(RedisError::UnsupportedCommand) => {
-                err_resp = Some("-ERROR: Unsupported command\r\n".to_owned());
-            }
-            Err(RedisError::InvalidScript) => {
-                err_resp = Some("-ERROR: Scripts must have 1 key\r\n".to_owned());
-            }
-            Err(_reason) => {
-                debug!("Failed to shard: reason: {:?}", _reason);
-            }
-        }
-
-        match err_resp {
-            Some(resp) => {
-                self.write_to_client(client_token, resp, written_sockets);
-            }
-            None => {
-            }
-        }
-        debug!("All done handling client!");
+        return Ok(());
     }
 
     // Fired when a reconnect is desired.
@@ -351,17 +289,80 @@ impl BackendPool {
         self.get_backend(backend_token).connect();
         info!("Attempted to reconnect: Backend {:?}", &backend_token);
     }
+}
 
-    fn write_to_client(&mut self, client_token: Token, message: String, written_sockets: &mut VecDeque<(Token, StreamType)>,) {
-        match self.client_sockets.get_mut(&client_token) {
-            Some(stream) => {
-                debug!("Wrote to client {:?}: {:?}", client_token, message);
-                let _ = stream.get_mut().write(&message.into_bytes()[..]);
-                written_sockets.push_back((client_token.clone(), StreamType::PoolClient));
-            }
-            _ => panic!("No client remaining for pool"),
+// Based on the given command, determine which Backend to use, if any.
+// We support Ketama, Modula, and Random.
+pub fn shard<'a>(
+    config: &BackendPoolConfig,
+    backends: &VecDeque<Token>,
+    backend_map: &'a mut HashMap<Token, Backend>,
+    command: &[u8]) -> Result<&'a mut Backend, RedisError> {
+    let key = match extract_key(command) {
+        Ok(key) => key,
+        Err(err) => {
+            return Err(err);
+        }
+    };
+    let tag = get_tag(key, &config.hash_tag);
+
+    // TODO: Also, we want to cache the shardmap building if possible.
+
+    // How does the ConsistentHashing library work?
+    if config.distribution == Distribution::Ketama {
+        let mut consistent_hash = conhash::ConsistentHash::new();
+        for i in backends.iter() {
+            let backend = backend_map.get_mut(i).unwrap();
+            // 40 is pulled to match twemproxy's ketama.
+            consistent_hash.add(&TokenNode {token: i.clone()}, backend.weight * 40);
+            //consistent_hash.add(&TokenNode {token: i.clone()}, backend.weight);
+            // TODO: Determine # of replicas. Most likely it's just the weight.
+            // TODO: Check if there's any discrepancy between this key and twemproxy.
+        }
+        let hashed_token = consistent_hash.get(tag).unwrap().token;
+        return Ok(backend_map.get_mut(&hashed_token).unwrap());
+    }
+
+    // Get total size:
+    let mut total_weight = 0;
+    for i in backends.iter() {
+        let backend = backend_map.get_mut(i).unwrap();
+        if !config.auto_eject_hosts || backend.is_available() {
+            total_weight += backend.weight;
         }
     }
+
+    let shard: Result<usize, String> = match config.distribution {
+        Distribution::Modula => Ok(hash(&config.hash_function, &tag) % total_weight), // Should be using key, not command.
+        Distribution::Random => Ok(thread_rng().gen_range(0, total_weight - 1)),
+        _ => panic!("Impossible to hit this with ketama!"),
+    };
+    let mut answer = None;
+    match shard {
+        Ok(shard_no) => {
+            debug!("Sharding command tag to be {}", shard_no);
+            {
+                let ref backends = backends;
+                for backend_token in backends.iter() {
+                    let backendbogus = backend_map.get_mut(backend_token).unwrap();
+                    if config.auto_eject_hosts && !backendbogus.is_available() {
+                        continue;
+                    }
+                    if shard_no >= total_weight - 1 {
+                        answer = Some(backend_token.clone());
+                        break;
+                    }
+                    total_weight -= backendbogus.weight;
+                }
+            }
+            match answer {
+                Some(backend_token) => return Ok(backend_map.get_mut(&backend_token).unwrap()),
+                None => panic!("Overflowed when determining shard!"),
+            }
+        }
+        Err(error) => debug!("Received {} while sharding!", error),
+    }
+    Err(RedisError::Unknown)
 }
 
 #[cfg(test)]
@@ -400,70 +401,6 @@ fn get_tag<'a>(key: &'a [u8], tags: &String) -> &'a [u8] {
         index += 1;
     }
     return key;
-}
-
-// TODO: Rewrite this
-pub fn parse_redis_response(stream: &mut BufReader<TcpStream>) -> &[u8] {
-    let len = stream.buffer().len();
-    stream.consume(len);
-    debug!("Stream info: {:?}", stream);
-    let _ = stream.fill_buf();
-    // fill buff, then figure out how many bytes the message takes, then send only a slice of that.
-    // when to consume it though? When it is sent, it is done. that happens when it's written to.
-    debug!("Stream info after: {:?}", stream);
-    return stream.buffer();
-    /*
-    let mut string = String::new();
-    let _ = stream.read_line(&mut string);
-    match string.chars().next() {
-        Some('$') => {
-            if Some('-') == {
-                let mut chars = string.chars();
-                chars.next();
-                chars.next()
-            } {
-                return string;
-            }
-            let bytes = {
-                let mut next_line = String::from(&string[1..]);
-                next_line.pop();
-                next_line.pop();
-                match next_line.parse::<usize>() {
-                    Ok(int) => int,
-                    Err(err) => {
-                        error!("Could not parse array response length: {} {} {}", string, err, next_line);
-                        0
-                    }
-                }
-            };
-            let mut buf = vec![0; bytes + 2];
-            let _ = stream.read_exact(&mut buf);
-            match String::from_utf8(buf) {
-                Ok(result) => string.push_str(&result),
-                Err(err) => error!("Could not parse from utf8 buffer: {}", err),
-            }
-        }
-        Some('*') => {
-            let lines = {
-                let mut next_line = String::from(&string[1..]);
-                next_line.pop();
-                next_line.pop();
-                match next_line.parse::<usize>() {
-                    Ok(int) => int,
-                    Err(err) => {
-                        error!("Could not parse array response length: {} {} {}", string, err, next_line);
-                        0
-                    }
-                }
-            };
-            for _ in 0..lines {
-                let next_line = parse_redis_response(stream);
-                string.push_str(&next_line);
-            }
-        }
-        _ => {}
-    }
-    string*/
 }
 
 pub fn _parse_redis_response(stream: &mut BufReader<TcpStream>) -> &str {
