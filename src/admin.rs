@@ -3,12 +3,10 @@ use redflareproxy::{ClientToken};
 use config::{AdminConfig};
 
 use mio::*;
-use bufstream::BufStream;
 use bufreader::BufReader;
 use mio::tcp::{TcpListener, TcpStream};
 use std::collections::*;
-use fxhash::FxHashMap as HashMap;
-use fxhash::FxHashMap;
+use hashbrown::HashMap;
 use std::io::Write;
 use std::cell::Cell;
 
@@ -50,7 +48,7 @@ impl AdminPort {
         debug!("Registered admin socket.");
 
         AdminPort {
-            client_sockets: FxHashMap::default(),
+            client_sockets: HashMap::new(),
             socket: server_socket,
             config: config,
         }

@@ -12,7 +12,7 @@ use std::mem;
 use std::cell::{Cell, RefCell};
 use std::rc::Rc;
 
-use fxhash::FxHashMap;
+use hashbrown::HashMap;
 
 // For admin reqs.
 use backend::parse_redis_command;
@@ -47,7 +47,7 @@ pub enum Subscriber {
 
 pub fn generate_backend_token(
     next_socket_index: &Cell<usize>,
-    backend_tokens: &RefCell<FxHashMap<BackendToken, PoolToken>>,
+    backend_tokens: &RefCell<HashMap<BackendToken, PoolToken>>,
     pool_token: PoolToken
 ) -> BackendToken {
     next_socket_index.set(next_socket_index.get() + SOCKET_INDEX_SHIFT);
@@ -72,12 +72,12 @@ pub struct RedFlareProxy {
     pub staged_config: Option<RedFlareProxyConfig>,
 
     // Child structs.
-    pub backendpools: FxHashMap<PoolToken, BackendPool>,
+    pub backendpools: HashMap<PoolToken, BackendPool>,
 
     // Registry...
-    backend_configs: FxHashMap<BackendPoolConfig, PoolToken>,
-    backend_tokens: Rc<RefCell<FxHashMap<BackendToken, PoolToken>>>,
-    subscribers: Rc<RefCell<FxHashMap<Token, Subscriber>>>,
+    backend_configs: HashMap<BackendPoolConfig, PoolToken>,
+    backend_tokens: Rc<RefCell<HashMap<BackendToken, PoolToken>>>,
+    subscribers: Rc<RefCell<HashMap<Token, Subscriber>>>,
     pub written_sockets: Box<VecDeque<(Token, StreamType)>>,
     poll: Rc<RefCell<Poll>>,
     next_socket_index: Rc<Cell<usize>>,
@@ -92,18 +92,18 @@ impl RedFlareProxy {
                 return Err(format!("Failed to init poll: {:?}", error));
             }
         };
-        let subscribers = Rc::new(RefCell::new(FxHashMap::default()));
+        let subscribers = Rc::new(RefCell::new(HashMap::new()));
         let admin = admin::AdminPort::new(config.admin.clone(), &poll.borrow(), &mut subscribers.borrow_mut());
 
         let mut redflareproxy = RedFlareProxy {
             admin: admin,
             next_socket_index: Rc::new(Cell::new(FIRST_SOCKET_INDEX)),
-            //backendpools: FxHashMap::with_capacity(config.pools.len()),
-            backendpools: FxHashMap::default(),
+            //backendpools: HashMap::with_capacity(config.pools.len()),
+            backendpools: HashMap::new(),
             config: config,
             staged_config: None,
-            backend_tokens: Rc::new(RefCell::new(FxHashMap::default())),
-            backend_configs: FxHashMap::default(),
+            backend_tokens: Rc::new(RefCell::new(HashMap::new())),
+            backend_configs: HashMap::new(),
             subscribers: subscribers,
             written_sockets: Box::new(VecDeque::new()),
             poll: poll,
@@ -299,7 +299,7 @@ impl RedFlareProxy {
                         let backend_token = Token(token.0 - 1);
                         pool.handle_reconnect(backend_token)
                     }
-                    None => error!("FxHashMap says it has token but it really doesn't! {:?}",subscriber),
+                    None => error!("HashMap says it has token but it really doesn't! {:?}",subscriber),
                 }
             }
             Subscriber::RequestTimeout(pool_token, target_timestamp) => {
@@ -309,28 +309,28 @@ impl RedFlareProxy {
                     Some(pool) => {
                         pool.handle_timeout(backend_token, target_timestamp);
                     }
-                    None => error!("FxHashMap says it has token but it really doesn't! {:?}",subscriber),
+                    None => error!("HashMap says it has token but it really doesn't! {:?}",subscriber),
                 }
             }
             Subscriber::PoolListener => {
                 debug!("PoolListener {:?}", token);
                 match self.backendpools.get_mut(&token) {
                     Some(pool) => pool.accept_client_connection(&self.next_socket_index, &mut self.subscribers.borrow_mut(), &self.poll, token),
-                    None => error!("FxHashMap says it has token but it really doesn't!"),
+                    None => error!("HashMap says it has token but it really doesn't!"),
                 }
             }
             Subscriber::PoolClient(pool_token) => {
                 debug!("PoolClient {:?} for Pool {:?}", token, pool_token);
                 match self.backendpools.get_mut(&pool_token) {
                     Some(pool) => { pool.handle_client_readable(&mut self.written_sockets, token); }
-                    None => error!("FxHashMap says it has token but it really doesn't!"),
+                    None => error!("HashMap says it has token but it really doesn't!"),
                 }
             }
             Subscriber::PoolServer(pool_token) => {
                 debug!("PoolServer {:?} for Pool {:?}", token, pool_token);
                 match self.backendpools.get_mut(&pool_token) {
                     Some(pool) => pool.get_backend(token).handle_backend_response(token),
-                    None => error!("FxHashMap says it has token but it really doesn't!"),
+                    None => error!("HashMap says it has token but it really doesn't!"),
                 }
             }
             Subscriber::AdminClient => {

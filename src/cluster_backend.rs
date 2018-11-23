@@ -3,8 +3,7 @@ use backend::{BackendStatus, Host, SingleBackend};
 use backendpool::BackendPool;
 use config::BackendConfig;
 use std::collections::{VecDeque};
-use fxhash::FxHashMap as HashMap;
-use fxhash::FxHashMap;
+use hashbrown::HashMap;
 use crc16::*;
 use mio::{Token, Poll};
 use std::time::Instant;
@@ -244,10 +243,10 @@ impl ClusterBackend {
         pool: &mut BackendPool,
         written_sockets: &mut VecDeque<(Token, StreamType)>,
     ) -> (ClusterBackend, Vec<BackendToken>) {
-        let hosts = FxHashMap::default();
+        let hosts = HashMap::new();
         let mut cluster = ClusterBackend {
             hosts: hosts,
-            hostnames: FxHashMap::default(),
+            hostnames: HashMap::new(),
             slots: Vec::with_capacity(16384),
             config: config,
             status: BackendStatus::DISCONNECTED,

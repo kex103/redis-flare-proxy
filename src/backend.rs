@@ -14,7 +14,7 @@ use std::cell::Cell;
 use std::cell::RefCell;
 use std::rc::Rc;
 use cluster_backend::{ClusterBackend};
-use fxhash::FxHashMap as HashMap;
+use hashbrown::HashMap;
 use redisprotocol::extract_redis_command;
 use redisprotocol::RedisError;
 

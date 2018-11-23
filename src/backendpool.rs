@@ -14,8 +14,7 @@ use std::collections::{VecDeque};
 use std::string::String;
 use std::io::{Write, BufRead};
 use std::time::{Instant};
-use fxhash::FxHashMap as HashMap;
-use fxhash::FxHashMap;
+use hashbrown::HashMap;
 use conhash::*;
 use conhash::Node;
 
@@ -60,9 +59,9 @@ impl BackendPool {
             token: pool_token,
             config: config,
             backends: VecDeque::new(),
-            backend_map: FxHashMap::default(),
-            all_backend_tokens: FxHashMap::default(),
-            client_sockets: FxHashMap::default(),
+            backend_map: HashMap::new(),
+            all_backend_tokens: HashMap::new(),
+            client_sockets: HashMap::new(),
             listen_socket: None,
         }
     }
