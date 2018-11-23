@@ -1,4 +1,4 @@
-use redflareproxy::{BackendToken, PoolToken, ClientToken, generate_backend_token, StreamType, NULL_TOKEN, Subscriber};
+use redflareproxy::{BackendToken, PoolToken, ClientToken, generate_backend_token, NULL_TOKEN, Subscriber};
 use backend::{BackendStatus, Host, SingleBackend};
 use backendpool::BackendPool;
 use config::BackendConfig;
@@ -219,7 +219,6 @@ pub struct ClusterBackend {
     token: BackendToken,
     queue: VecDeque<(ClientToken, Instant)>,
     parent: *mut BackendPool,
-    written_sockets: *mut VecDeque<(Token, StreamType)>,
     // Following are stored for future backend connections that can be established.
     timeout: usize,
     failure_limit: usize,
@@ -241,7 +240,6 @@ impl ClusterBackend {
         failure_limit: usize,
         retry_timeout: usize,
         pool: &mut BackendPool,
-        written_sockets: &mut VecDeque<(Token, StreamType)>,
     ) -> (ClusterBackend, Vec<BackendToken>) {
         let hosts = HashMap::new();
         let mut cluster = ClusterBackend {
@@ -253,7 +251,6 @@ impl ClusterBackend {
             token: token,
             queue: VecDeque::new(),
             parent: pool as *mut BackendPool,
-            written_sockets: written_sockets as *mut VecDeque<(Token, StreamType)>,
             timeout: timeout,
             failure_limit: failure_limit,
             retry_timeout: retry_timeout,
@@ -280,7 +277,6 @@ impl ClusterBackend {
                 failure_limit,
                 retry_timeout,
                 pool,
-                written_sockets,
             );
             cluster.hosts.insert(backend_token.clone(), single);
             cluster.hostnames.insert(host.clone(), backend_token);
@@ -303,7 +299,6 @@ impl ClusterBackend {
                 self.failure_limit,
                 self.retry_timeout,
                 self.parent,
-                self.written_sockets,
             );
         self.hosts.insert(backend_token.clone(), single);
         self.hostnames.insert(host.clone(), backend_token);
@@ -457,12 +452,6 @@ impl ClusterBackend {
             return true;
         }
         false
-    }
-
-    pub fn flush_stream(&mut self) {
-        for (_, ref mut backend) in &mut self.hosts {
-            backend.flush_stream();
-        }
     }
 
     fn parent_token(&self) -> Token {

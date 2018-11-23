@@ -6,8 +6,6 @@ use backendpool;
 use backendpool::BackendPool;
 use mio::*;
 use mio::unix::{UnixReady};
-use std::collections::*;
-use std::io::{Write};
 use std::mem;
 use std::cell::{Cell, RefCell};
 use std::rc::Rc;
@@ -27,12 +25,6 @@ pub const SOCKET_INDEX_SHIFT: usize = 2;
 pub type BackendToken = Token;
 pub type PoolToken = Token;
 pub type ClientToken = Token;
-
-pub enum StreamType {
-    AdminClient,
-    PoolClient,
-    PoolServer,
-}
 
 #[derive(Clone, Copy, Debug)]
 pub enum Subscriber {
@@ -78,7 +70,6 @@ pub struct RedFlareProxy {
     backend_configs: HashMap<BackendPoolConfig, PoolToken>,
     backend_tokens: Rc<RefCell<HashMap<BackendToken, PoolToken>>>,
     subscribers: Rc<RefCell<HashMap<Token, Subscriber>>>,
-    pub written_sockets: Box<VecDeque<(Token, StreamType)>>,
     poll: Rc<RefCell<Poll>>,
     next_socket_index: Rc<Cell<usize>>,
     running: bool,
@@ -105,7 +96,6 @@ impl RedFlareProxy {
             backend_tokens: Rc::new(RefCell::new(HashMap::new())),
             backend_configs: HashMap::new(),
             subscribers: subscribers,
-            written_sockets: Box::new(VecDeque::new()),
             poll: poll,
             running: true,
         };
@@ -190,63 +180,6 @@ impl RedFlareProxy {
             for event in events.iter() {
                 debug!("Event detected: {:?} {:?}", &event.token(), event.readiness());
                 self.handle_event(&event);
-                //self.write_to_sockets();
-            }
-            //self.write_to_sockets();
-        }
-    }
-
-    fn write_to_sockets(&mut self) {
-        loop {
-            let temp = self.written_sockets.pop_front();
-            debug!("Flushed writing to sockets.");
-            let (stream_token, stream_type) = match temp {
-                Some(socket_token) => socket_token,
-                None => break,
-            };
-            match stream_type {
-                StreamType::AdminClient => {
-                    match self.admin.client_sockets.get_mut(&stream_token) {
-                        Some(stream) => {
-                            let _ = stream.get_mut().flush();
-                        }
-                        None => {
-                            debug!("write_to_sockets: AdminClient {:?} no longer registered. Did a switch_config occur?", stream_token);
-                        }
-                    }
-                }
-                StreamType::PoolClient => {
-                    match self.subscribers.borrow().get(&stream_token) {
-                        Some(sub) => {
-                            let subscriber = sub.clone();
-                            match subscriber {
-                                Subscriber::PoolClient(pool_token) => {
-                                    let pool = self.backendpools.get_mut(&pool_token).unwrap();
-                                    debug!("Writing out to {:?}", stream_token);
-                                    let _ = pool.client_sockets.get_mut(&stream_token).unwrap().get_mut().flush();
-                                }
-
-                                _ => panic!("write_to_sockets: Mismatch between StreamType and Subscriber: {:?}. Shutting down.", stream_token),
-                            }
-                        }
-                        None => {
-                            debug!("write_to_sockets: PoolClient {:?} no longer registered as a subscriber. Did a switch_config occur?", stream_token);
-                        }
-                    }
-                }
-                StreamType::PoolServer => {
-                    match self.backend_tokens.borrow_mut().get_mut(&stream_token) {
-                        Some(p_token) => {
-                            let pool_token = p_token.clone();
-                            let pool = self.backendpools.get_mut(&pool_token).unwrap();
-                            let backend = pool.get_backend(stream_token);
-                            backend.flush_stream();
-                        }
-                        None => {
-                            debug!("write_to_sockets: PoolServer {:?} no longer registered. Did a switch_config occur?", stream_token);
-                        }
-                    }
-                }
             }
         }
     }
@@ -322,7 +255,7 @@ impl RedFlareProxy {
             Subscriber::PoolClient(pool_token) => {
                 debug!("PoolClient {:?} for Pool {:?}", token, pool_token);
                 match self.backendpools.get_mut(&pool_token) {
-                    Some(pool) => { pool.handle_client_readable(&mut self.written_sockets, token); }
+                    Some(pool) => { pool.handle_client_readable(token); }
                     None => error!("HashMap says it has token but it really doesn't!"),
                 }
             }
@@ -362,7 +295,7 @@ impl RedFlareProxy {
                 panic!("This should be impossible. The pool was just inserted into the map");
             }
         };
-        moved_pool.connect(&self.backend_tokens, &self.next_socket_index, &mut self.poll, &self.subscribers, &mut self.written_sockets);
+        moved_pool.connect(&self.backend_tokens, &self.next_socket_index, &mut self.poll, &self.subscribers);
 
         self.backend_configs.insert(pool_config.clone(), pool_token);
     }
@@ -394,7 +327,6 @@ impl RedFlareProxy {
                 true
             }
         );
-        // written_sockets may refer to streams associated with removed pools. Those arre ignored, and a debug log emitted.
     }
 
     fn get_socket_index(&mut self) -> usize {
@@ -486,7 +418,7 @@ impl RedFlareProxy {
             response.push_str(res.as_str());
             response.push_str("\r\n");
             debug!("RESPONSE: {}", &response);
-            self.admin.write_to_client(token, response, &mut self.written_sockets);
+            self.admin.write_to_client(token, response);
         }
         if switching_config {
             let result = {
@@ -495,7 +427,7 @@ impl RedFlareProxy {
             match result {
                 Ok(_) => {
                     let response = "+OK\r\n".to_owned();
-                    self.admin.write_to_client(token, response, &mut self.written_sockets);
+                    self.admin.write_to_client(token, response);
 
                 }
                 Err(message) => {
@@ -503,7 +435,7 @@ impl RedFlareProxy {
                     response.push_str("-");
                     response.push_str(message.as_str());
                     response.push_str("\r\n");
-                    self.admin.write_to_client(token, response, &mut self.written_sockets);
+                    self.admin.write_to_client(token, response);
 
                 }
             }

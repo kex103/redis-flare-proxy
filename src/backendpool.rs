@@ -2,7 +2,7 @@ use redisprotocol::extract_redis_command;
 use hash::hash;
 use redflareproxy::BackendToken;
 use redflareproxy::PoolToken;
-use redflareproxy::{StreamType, Subscriber};
+use redflareproxy::{Subscriber};
 use redflareproxy::{generate_backend_token, generate_client_token};
 use config::{Distribution, BackendPoolConfig};
 use backend::{Backend};
@@ -72,7 +72,6 @@ impl BackendPool {
         next_socket_index: &Rc<Cell<usize>>,
         poll_registry: &Rc<RefCell<Poll>>,
         subscribers_registry: &Rc<RefCell<HashMap<Token, Subscriber>>>,
-        written_sockets: &mut VecDeque<(Token, StreamType)>,
     ) {
         // Initialize backends.
         for backend_config in self.config.servers.clone() {
@@ -88,7 +87,6 @@ impl BackendPool {
                 self.config.failure_limit,
                 self.config.retry_timeout,
                 self as &mut BackendPool,
-                written_sockets,
             );
             self.backend_map.insert(backend_token.clone(), backend);
             for extra_token in all_backend_tokens {
@@ -199,7 +197,6 @@ impl BackendPool {
 
     pub fn handle_client_readable(
         &mut self,
-        written_sockets: &mut VecDeque<(Token, StreamType)>,
         client_token: Token
     ) -> Result<(), RedisError> {
         debug!("Handling client: {:?}", &client_token);
@@ -257,7 +254,6 @@ impl BackendPool {
                         Some(resp) => {
                             debug!("Wrote to client {:?}: {:?}", client_token, resp);
                             let _ = stream.get_mut().write(&resp.into_bytes()[..]);
-                            /*written_sockets.push_back((client_token.clone(), StreamType::PoolClient));*/
                         }
                         None => {
                         }

@@ -1,11 +1,10 @@
-use redflareproxy::{StreamType, Subscriber, SOCKET_INDEX_SHIFT, SERVER};
+use redflareproxy::{Subscriber, SOCKET_INDEX_SHIFT, SERVER};
 use redflareproxy::{ClientToken};
 use config::{AdminConfig};
 
 use mio::*;
 use bufreader::BufReader;
 use mio::tcp::{TcpListener, TcpStream};
-use std::collections::*;
 use hashbrown::HashMap;
 use std::io::Write;
 use std::cell::Cell;
@@ -74,11 +73,10 @@ impl AdminPort {
         self.client_sockets.insert(token, BufReader::new(c));
     }
 
-    pub fn write_to_client(&mut self, client_token: ClientToken, message: String, written_sockets: &mut Box<VecDeque<(Token, StreamType)>>) {
+    pub fn write_to_client(&mut self, client_token: ClientToken, message: String) {
         match self.client_sockets.get_mut(&client_token) {
             Some(client_stream) => {
                 let _ = client_stream.get_mut().write(&message.into_bytes()[..]);
-                written_sockets.push_back((client_token, StreamType::AdminClient));
             }
             None => {
                 debug!("No client found for admin: {:?}. Did a switch_config just occur?", client_token);

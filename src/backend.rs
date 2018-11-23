@@ -1,5 +1,5 @@
 use bufreader::BufReader;
-use redflareproxy::{StreamType, NULL_TOKEN, Subscriber};
+use redflareproxy::{NULL_TOKEN, Subscriber};
 use config::BackendConfig;
 use backendpool::{BackendPool};
 use mio::*;
@@ -49,7 +49,6 @@ impl Backend {
         failure_limit: usize,
         retry_timeout: usize,
         pool: &mut BackendPool,
-        written_sockets: &mut VecDeque<(Token, StreamType)>,
     ) -> (Backend, Vec<Token>) {
         let weight = config.weight;
         let (backend, all_backend_tokens) = match config.use_cluster {
@@ -65,7 +64,6 @@ impl Backend {
                     failure_limit,
                     retry_timeout,
                     pool,
-                    written_sockets
                 );
                 (BackendEnum::Single(backend), tokens)
             }
@@ -81,7 +79,6 @@ impl Backend {
                     failure_limit,
                     retry_timeout,
                     pool,
-                    written_sockets
                 );
                 (BackendEnum::Cluster(backend), tokens)
             }
@@ -124,13 +121,6 @@ impl Backend {
         }
     }
 
-    pub fn flush_stream(&mut self) {
-        match self.single {
-            BackendEnum::Single(ref mut backend) => backend.flush_stream(),
-            BackendEnum::Cluster(ref mut backend) => backend.flush_stream(),
-        }
-    }
-
     pub fn handle_backend_response(&mut self, token: Token) {
         match self.single {
             BackendEnum::Single(ref mut backend) => {
@@ -161,7 +151,6 @@ pub struct SingleBackend {
     parent: *mut BackendPool,
     subscribers_registry: Rc<RefCell<HashMap<Token, Subscriber>>>,
     poll_registry: Rc<RefCell<Poll>>,
-    written_sockets: *mut VecDeque<(Token, StreamType)>,
     socket: Option<BufReader<TcpStream>>,
     timer: Option<Timer<Instant>>,
     pub timeout: usize,
@@ -180,7 +169,6 @@ impl SingleBackend {
         failure_limit: usize,
         retry_timeout: usize,
         pool: *mut BackendPool,
-        written_sockets: *mut VecDeque<(Token, StreamType)>
     ) -> (SingleBackend, Vec<Token>) {
         debug!("Initialized Backend: token: {:?}", token);
         // TODO: Configure message queue size per backend.
@@ -200,7 +188,6 @@ impl SingleBackend {
             parent: pool as *mut BackendPool,
             socket: None,
             timer: None,
-            written_sockets: written_sockets as *mut VecDeque<(Token, StreamType)>,
             waiting_for_auth_resp: false,
             waiting_for_db_resp: false,
             waiting_for_ping_resp: false,
@@ -273,10 +260,7 @@ impl SingleBackend {
             wait_for_resp = true;
         }
 
-        if wait_for_resp {
-            self.flush_stream();
-        }
-        else {
+        if !wait_for_resp {
             self.change_state(BackendStatus::READY);
         }
     }
@@ -381,17 +365,6 @@ impl SingleBackend {
         self.socket = None;
     }
 
-    pub fn flush_stream(&mut self) {
-        match self.socket {
-            Some(ref mut socket) => {
-                let _ = socket.get_mut().flush();
-            }
-            None => {
-                debug!("Backend {:?} stream not found when flushing. Did it just get DISCONNECTED?", self.token);
-            }
-        }
-    }
-
     pub fn write_message(
         &mut self,
         message: &[u8],
@@ -418,7 +391,6 @@ impl SingleBackend {
         while self.queue.len() > 0 {
             let a = route_backend_response(
                 &mut self.socket,
-                &mut self.written_sockets, 
                 &mut self.parent,
                 &mut self.queue,
                 &mut self.token,
@@ -518,13 +490,6 @@ impl SingleBackend {
         }
     }
 
-    fn register_written_socket(&self, token: Token, stream_type: StreamType) {
-        /*let written_sockets = unsafe {
-            &mut *self.written_sockets as &mut VecDeque<(Token, StreamType)>
-        };
-        written_sockets.push_back((token, stream_type));*/
-    }
-
     fn write_to_client(&mut self, client_token: Token, message: &[u8]) {
         if client_token == NULL_TOKEN {
             return;
@@ -533,7 +498,6 @@ impl SingleBackend {
             Some(stream) => {
                 debug!("Wrote to client {:?}: {:?}", client_token, message);
                 let _ = stream.get_mut().write(message);
-                self.register_written_socket(client_token, StreamType::PoolClient);
             }
             _ => panic!("Found listener instead of stream! for clienttoken {:?}", client_token),
         }
@@ -551,7 +515,6 @@ impl SingleBackend {
             }
             None => panic!("No connection to backend"),
         }
-        self.register_written_socket(self.token.clone(), StreamType::PoolServer);
         let now = Instant::now();
         let timestamp = now + Duration::from_millis(self.timeout as u64);
         self.queue.push_back((client_token, timestamp));
@@ -644,16 +607,8 @@ fn parent_clients(parent: & *mut BackendPool) -> &mut HashMap<Token, BufReader<T
     }
 }
 
-fn register_written_socket(written_sockets: & *mut VecDeque<(Token, StreamType)>, token: Token, stream_type: StreamType) {
-    /*let written_sockets = unsafe {
-        &mut **written_sockets as &mut VecDeque<(Token, StreamType)>
-    };
-    written_sockets.push_back((token, stream_type));*/
-}
-
 fn route_backend_response(
     stream: &mut Option<BufReader<TcpStream>>,
-    written_sockets: & *mut VecDeque<(Token, StreamType)>,
     parent: & *mut BackendPool,
     queue: &mut VecDeque<(Token, Instant)>,
     token: &mut Token,
@@ -700,7 +655,6 @@ fn route_backend_response(
                         Some(stream) => {
                             debug!("Wrote to client {:?}: {:?}", client_token, response);
                             let _ = stream.get_mut().write(response);
-                            register_written_socket(written_sockets, client_token, StreamType::PoolClient);
                         }
                         None => panic!("Found listener instead of stream! for clienttoken {:?}", client_token),
                     }
