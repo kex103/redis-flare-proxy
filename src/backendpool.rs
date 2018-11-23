@@ -257,7 +257,7 @@ impl BackendPool {
                         Some(resp) => {
                             debug!("Wrote to client {:?}: {:?}", client_token, resp);
                             let _ = stream.get_mut().write(&resp.into_bytes()[..]);
-                            written_sockets.push_back((client_token.clone(), StreamType::PoolClient));
+                            /*written_sockets.push_back((client_token.clone(), StreamType::PoolClient));*/
                         }
                         None => {
                         }

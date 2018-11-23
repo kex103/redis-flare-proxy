@@ -190,9 +190,9 @@ impl RedFlareProxy {
             for event in events.iter() {
                 debug!("Event detected: {:?} {:?}", &event.token(), event.readiness());
                 self.handle_event(&event);
-                self.write_to_sockets();
+                //self.write_to_sockets();
             }
-            self.write_to_sockets();
+            //self.write_to_sockets();
         }
     }
 

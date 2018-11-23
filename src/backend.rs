@@ -519,10 +519,10 @@ impl SingleBackend {
     }
 
     fn register_written_socket(&self, token: Token, stream_type: StreamType) {
-        let written_sockets = unsafe {
+        /*let written_sockets = unsafe {
             &mut *self.written_sockets as &mut VecDeque<(Token, StreamType)>
         };
-        written_sockets.push_back((token, stream_type));
+        written_sockets.push_back((token, stream_type));*/
     }
 
     fn write_to_client(&mut self, client_token: Token, message: &[u8]) {
@@ -645,10 +645,10 @@ fn parent_clients(parent: & *mut BackendPool) -> &mut HashMap<Token, BufReader<T
 }
 
 fn register_written_socket(written_sockets: & *mut VecDeque<(Token, StreamType)>, token: Token, stream_type: StreamType) {
-    let written_sockets = unsafe {
+    /*let written_sockets = unsafe {
         &mut **written_sockets as &mut VecDeque<(Token, StreamType)>
     };
-    written_sockets.push_back((token, stream_type));
+    written_sockets.push_back((token, stream_type));*/
 }
 
 fn route_backend_response(
