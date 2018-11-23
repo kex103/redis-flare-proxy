@@ -1,4 +1,4 @@
-use redisprotocol::extract_redis_command;
+use redisprotocol::extract_redis_command2;
 use hash::hash;
 use redflareproxy::BackendToken;
 use redflareproxy::PoolToken;
@@ -216,7 +216,7 @@ impl BackendPool {
                         }
                         else {
                             debug!("Read from client:\n{:?}", std::str::from_utf8(buf));
-                            let client_request = try!(extract_redis_command(buf));
+                            let client_request = try!(extract_redis_command2(buf));
                             debug!("Read from client:\n{:?}", std::str::from_utf8(&client_request));
 
 

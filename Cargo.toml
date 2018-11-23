@@ -24,6 +24,7 @@ gcc = "*"
 fasthash = "0.3.1"
 hashers = "1.0.1"
 hashbrown = "0.1"
+memchr = "2"
 
 [dev-dependencies]
 redis = "0.5.3"

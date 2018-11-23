@@ -20,6 +20,7 @@ extern crate crc;
 extern crate fasthash;
 extern crate hashers;
 extern crate hashbrown;
+extern crate memchr;
 
 use log::LogLevelFilter;
 use log4rs::append::console::ConsoleAppender;

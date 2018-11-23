@@ -15,7 +15,7 @@ use std::cell::RefCell;
 use std::rc::Rc;
 use cluster_backend::{ClusterBackend};
 use hashbrown::HashMap;
-use redisprotocol::extract_redis_command;
+use redisprotocol::extract_redis_command2;
 use redisprotocol::RedisError;
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -629,7 +629,7 @@ fn route_backend_response(
                 };
 
                 debug!("Read from backend: {:?}", std::str::from_utf8(buf));
-                let response = try!(extract_redis_command(buf));
+                let response = try!(extract_redis_command2(buf));
                 if response.len() == 0 {
                     return Ok(false);
                 }
