@@ -46,8 +46,7 @@ class BenchmarkProxy(TestUtil):
         log_out = open("./tests/log/{}.log.stdout".format(self._testMethodName), 'w')
         args = [
             "-c {}".format(config_path),
-            "-l DEBUG",
-            "-o kex.out"
+            "-l ERROR",
         ]
         env = os.environ.copy()
         env['RUST_BACKTRACE'] = '1'
