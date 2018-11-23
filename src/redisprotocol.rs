@@ -155,36 +155,14 @@ fn next_byte(iter: &mut Iter<u8>, index: &mut usize) -> Result<u8, RedisError> {
     return Ok(b);
 }
 
-fn parse_num_bytes(first_byte: u8, iter: &mut Iter<u8>, index: &mut usize, bytes: &[u8]) -> Result<usize, RedisError> {
+fn parse_num_bytes(first_byte: u8, iter: &mut Iter<u8>, index: &mut usize, bytes: &[u8]) -> Result<isize, RedisError> {
     let mut b = first_byte;
     if b != '$' as u8 {
         //debug!("Expected a - but got {:?} instead", b as char);
         return Err(RedisError::InvalidProtocol);
     }
 
-    // parse the integer.
-    let start_index = *index + 1;
-    while b != '\n' as u8 {
-        *index += 1;
-        b = match iter.next() {
-            Some(byte) => *byte,
-            None => { return Err(RedisError::Unknown); }
-        };
-    }
-    //debug!("Parsing int: {:?}", bytes.get(start_index..*index-1));
-    let raw_num = unsafe {
-        bytes.get_unchecked(start_index..*index-1)
-    };
-    let num = match std::str::from_utf8(raw_num) {
-        Ok(n) => {
-            match n.parse::<usize>() {
-                Ok(n) => n,
-                Err(_err) => { return Err(RedisError::InvalidProtocol); }
-            }
-        }
-        Err(_error) => { return Err(RedisError::InvalidProtocol); }
-    };
-    return Ok(num);
+    return interpret_num(iter, index);
 }
 
 fn parse_num(iter: &mut Iter<u8>, index: &mut usize, bytes: &[u8]) -> Result<isize, RedisError> {
@@ -365,7 +343,7 @@ pub fn extract_key(bytes: &[u8]) -> Result<&[u8], RedisError> {
         // skip 1
         try!(skip_past_eol(&mut bytes_iter, &mut index));
         let byte = try!(next_byte(&mut bytes_iter, &mut index));
-        let num = try!(parse_num_bytes(byte, &mut bytes_iter, &mut index, bytes));
+        let num = try!(parse_num_bytes(byte, &mut bytes_iter, &mut index, bytes)) as usize;
 
         // grab the command list.
         let command = unsafe {
@@ -378,7 +356,9 @@ pub fn extract_key(bytes: &[u8]) -> Result<&[u8], RedisError> {
             KeyPosition::None => { return Err(RedisError::Unknown); }
             KeyPosition::Next => {
                 let c = try!(skip_bytes(num+ 2, &mut bytes_iter, &mut index));
-                let num = try!(parse_num_bytes(c, &mut bytes_iter, &mut index, bytes));
+                let num = try!(parse_num_bytes(c, &mut bytes_iter, &mut index, bytes)) as usize;
+
+                // TODO: Account fro num being -1.
 
                 // grab the command list.
                 let key = unsafe {
@@ -388,10 +368,10 @@ pub fn extract_key(bytes: &[u8]) -> Result<&[u8], RedisError> {
             }
             KeyPosition::Eval => {
                 let c = try!(skip_bytes(num+ 2, &mut bytes_iter, &mut index));
-                let num = try!(parse_num_bytes(c, &mut bytes_iter, &mut index, bytes));
+                let num = try!(parse_num_bytes(c, &mut bytes_iter, &mut index, bytes)) as usize;
                 
                 let c = try!(skip_bytes(num+ 2, &mut bytes_iter, &mut index));
-                let num = try!(parse_num_bytes(c, &mut bytes_iter, &mut index, bytes));
+                let num = try!(parse_num_bytes(c, &mut bytes_iter, &mut index, bytes)) as usize;
 
                 let num_keys = unsafe {
                     bytes.get_unchecked(index+1..index+num+1)
@@ -401,7 +381,7 @@ pub fn extract_key(bytes: &[u8]) -> Result<&[u8], RedisError> {
                 }
 
                 let c = try!(skip_bytes(num+ 2, &mut bytes_iter, &mut index));
-                let num = try!(parse_num_bytes(c, &mut bytes_iter, &mut index, bytes));
+                let num = try!(parse_num_bytes(c, &mut bytes_iter, &mut index, bytes)) as usize;
 
                 let key = unsafe {
                     bytes.get_unchecked(index+1..index+num+1)
@@ -409,8 +389,6 @@ pub fn extract_key(bytes: &[u8]) -> Result<&[u8], RedisError> {
                 return Ok(key);
             }
         };
-
-
     } else {
         panic!("Unimplemented support for plain text commands");
     }
