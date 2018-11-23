@@ -224,21 +224,21 @@ impl BackendPool {
                             // Perhaps the API should be.. write_backend(message_string, token)
                             // A cluster needs... access to all possible connections.. ?
                             // Or it has its own.
-                            let mut err_resp = None;
+                            let mut err_resp: Option<&[u8]> = None;
                             match shard(&self.config, &self.backends, &mut self.backend_map, &client_request) {
                                 Ok(backend) => {
                                     if !backend.write_message(&client_request, client_token) {
-                                        err_resp = Some("-ERROR: Not connected\r\n".to_owned());
+                                        err_resp = Some(b"-ERROR: Not connected\r\n");
                                     }
                                 }
                                 Err(RedisError::NoBackend) => {
-                                    err_resp = Some("-ERROR: No backend\r\n".to_owned());
+                                    err_resp = Some(b"-ERROR: No backend\r\n");
                                 }
                                 Err(RedisError::UnsupportedCommand) => {
-                                    err_resp = Some("-ERROR: Unsupported command\r\n".to_owned());
+                                    err_resp = Some(b"-ERROR: Unsupported command\r\n");
                                 }
                                 Err(RedisError::InvalidScript) => {
-                                    err_resp = Some("-ERROR: Scripts must have 1 key\r\n".to_owned());
+                                    err_resp = Some(b"-ERROR: Scripts must have 1 key\r\n");
                                 }
                                 Err(_reason) => {
                                     debug!("Failed to shard: reason: {:?}", _reason);
@@ -253,7 +253,7 @@ impl BackendPool {
                     match err_resp {
                         Some(resp) => {
                             debug!("Wrote to client {:?}: {:?}", client_token, resp);
-                            let _ = stream.get_mut().write(&resp.into_bytes()[..]);
+                            let _ = stream.get_mut().write(resp);
                         }
                         None => {
                         }
