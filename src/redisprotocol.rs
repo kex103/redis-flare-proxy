@@ -213,6 +213,41 @@ fn parse_num(iter: &mut Iter<u8>, index: &mut usize, bytes: &[u8]) -> Result<isi
     return Ok(num);
 }
 
+fn interpret_num(bytes_iter: &mut Iter<u8>, index: &mut usize) -> Result<isize, RedisError> {
+    let mut negative = false;
+    let mut result = 0;
+    loop {
+        *index += 1;
+
+        match *bytes_iter.next().unwrap() as char {
+            '0' => {
+        result = result * 10;}
+            '1' => { result = result * 10 + 1; }
+            '2' => { result = result * 10 + 2; }
+            '3' => { result = result * 10 + 3; }
+            '4' => { result = result * 10 + 4; }
+            '5' => { result = result * 10 + 5; }
+            '6' => { result = result * 10 + 6; }
+            '7' => { result = result * 10 + 7; }
+            '8' => { result = result * 10 + 8; }
+            '9' => { result = result * 10 + 9; }
+            '-' => { negative = true; }
+            '\r' => {
+                bytes_iter.next();
+                *index += 1;
+                if negative {
+                    return Ok(-result);
+                } else {
+                    return Ok(result);
+                }
+            }
+            _ => {
+                return Err(RedisError::InvalidProtocol);
+            }
+        }
+
+    }
+}
 
 #[test]
 fn test_extract_redis_command() {
@@ -302,7 +337,7 @@ fn parse_redis_request(bytes_iter: &mut Iter<u8>, index: &mut usize, bytes: &[u8
             return Ok(());
         }
         '$' => {
-            let num = try!(parse_num(bytes_iter, index, bytes));
+            let num = try!(interpret_num(bytes_iter, index));
             if num < 0 {
                 return Ok(());
             }
@@ -310,9 +345,8 @@ fn parse_redis_request(bytes_iter: &mut Iter<u8>, index: &mut usize, bytes: &[u8
             return Ok(());
         }
         '*' => {
-            let num = try!(parse_num(bytes_iter, index, bytes));
+            let num = try!(interpret_num(bytes_iter, index));
             for _ in 0..num {
-                debug!("Finished one array el {:?}", index);
                 try!(parse_redis_request(bytes_iter, index, bytes));
             }
             return Ok(());
