@@ -163,7 +163,7 @@ pub struct SingleBackend {
     poll_registry: Rc<RefCell<Poll>>,
     written_sockets: *mut VecDeque<(Token, StreamType)>,
     socket: Option<BufReader<TcpStream>>,
-    timer: Option<Timer<bool>>,
+    timer: Option<Timer<Instant>>,
     pub timeout: usize,
     waiting_for_auth_resp: bool,
     waiting_for_db_resp: bool,
@@ -443,16 +443,28 @@ impl SingleBackend {
     fn retry_connect(&mut self) {
         debug!("Creating timer");
         // Create new timer.
-        let mut timer = create_timer();
-        let _ = timer.set_timeout(Duration::new(0, (1000000 * self.retry_timeout) as u32), true);
-        let timer_token = Token(self.token.0 + 1);
-        self.poll_registry.borrow_mut().register(&timer, timer_token, Ready::readable(), PollOpt::level()).unwrap();
+        if self.timer.is_none() {
+            let timer = create_timer();
+            let timer_token = Token(self.token.0 + 1);
+            self.poll_registry.borrow_mut().register(&timer, timer_token, Ready::readable(), PollOpt::edge()).unwrap();
+            self.timer = Some(timer);
+        }
+
+        let now = Instant::now();
+        let timestamp = now + Duration::from_millis(self.retry_timeout as u64);
+        match self.timer {
+            Some(ref mut timer) => {
+                let _ = timer.set_timeout(Duration::new(0, (1000000 * self.retry_timeout) as u32), timestamp);
+            }
+            None => { panic!("impossible"); }
+        }
         // need to handle with specific function for token. How to know what token this is?
         // can stuff into sockets. but it'll ahve timer token.
-        self.timer = Some(timer);
+
         let parent_token = self.parent_token().clone();
         debug!("Original: {:?}", self.parent_token());
         debug!("Parent token! {:?}", parent_token);
+        let timer_token = Token(self.token.0 + 1);
         self.subscribers_registry.borrow_mut().insert(timer_token, Subscriber::Timeout(parent_token));
     }
 
@@ -544,16 +556,28 @@ impl SingleBackend {
         let timestamp = now + Duration::from_millis(self.timeout as u64);
         self.queue.push_back((client_token, timestamp));
         if self.queue.len() == 1 && self.timeout != 0 {
-            let mut timer = create_timer();
-            let _ = timer.set_timeout(Duration::from_millis(self.timeout as u64), true);
-            let timer_token = self.get_timeout_token();
-            match self.poll_registry.borrow_mut().register(&timer, timer_token, Ready::readable(), PollOpt::edge() | PollOpt::oneshot()) {
-                Ok(_) => {}
-                Err(_err) => {error!("KEX: failed to register because unavailable. should fix timer system {:?}", _err);}
+
+
+
+            if self.timer.is_none() {
+                let timer = create_timer();
+                let timer_token = self.get_timeout_token();
+                self.poll_registry.borrow_mut().register(&timer, timer_token, Ready::readable(), PollOpt::edge()).unwrap();
+                self.timer = Some(timer);
             }
+
+            match self.timer {
+                Some(ref mut timer) => {
+                    let _ = timer.set_timeout(Duration::from_millis(self.timeout as u64), timestamp);
+                }
+                None => { panic!("impossible"); }
+            }
+
+
+
             // need to handle with specific function for token. How to know what token this is?
             // can stuff into sockets. but it'll ahve timer token.
-            self.timer = Some(timer);
+            let timer_token = self.get_timeout_token();
             self.subscribers_registry.borrow_mut().insert(timer_token, Subscriber::RequestTimeout(self.parent_token(), timestamp));
         }
     }
@@ -762,7 +786,7 @@ pub fn parse_redis_command(stream: &mut BufReader<TcpStream>) -> String {
 }
 
 // TODO: Should we want more clarity?
-fn create_timer() -> Timer<bool> {
+fn create_timer() -> Timer<Instant> {
     let mut builder = Builder::default();
     builder = builder.tick_duration(Duration::from_millis(10));
     builder.build()
