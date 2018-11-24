@@ -160,40 +160,36 @@ impl BackendPool {
         poll: &Rc<RefCell<Poll>>,
         pool_token: Token
     ) {
-        let socket = {    
-            match self.listen_socket {
-                Some(ref mut listener) => {
-                    let socket = match listener.accept() {
-                        Ok((socket, _)) => socket,
-                        Err(err) => {
-                            debug!("No more pending connections: {:?}", err);
-                            return
+        match self.listen_socket {
+            Some(ref mut listener) => {
+                loop {
+                    let mut stream = match listener.accept() {
+                        Ok(s) => s.0,
+                        Err(e) => {
+                            if e.kind() == std::io::ErrorKind::WouldBlock {
+                                return;
+                            }
+                            panic!("Failed for some reason {:?}", e);
                         }
                     };
-                    socket
+                    let client_token = generate_client_token(next_socket_index);
+                    match poll.borrow_mut().register(&stream, client_token, Ready::readable(), PollOpt::edge()) {
+                        Ok(_) => {
+                            self.client_sockets.insert(client_token, BufReader::new(stream));
+                            subscribers.insert(client_token, Subscriber::PoolClient(pool_token));
+                            info!("Backend Connection accepted: client {:?}", client_token);
+                        }
+                        Err(err) => {
+                            error!("Failed to register client token to poll: {:?}", err);
+                        }
+                    };
                 }
-                None => {
-                    error!("Listen socket is no more when accepting!");
-                    return
-                }
             }
-        };
-        let client_token = generate_client_token(next_socket_index);
-        match poll.borrow_mut().register(&socket, client_token, Ready::readable(), PollOpt::edge()) {
-            Ok(_) => {
-
-                self.client_sockets.insert(client_token, BufReader::new(socket));
-                subscribers.insert(client_token, Subscriber::PoolClient(pool_token));
-                info!("Backend Connection accepted: client {:?}", client_token);
+            None => {
+                error!("Listen socket is no more when accepting!");
+                return
             }
-            Err(err) => {
-                error!("Failed to register client token to poll: {:?}", err);
-            }
-        };
-
-        // Try again to see if there were multiple pending client connections.
-        // TODO: Should try using the TcpListener.incoming() iterator instead of being recursive?
-        self.accept_client_connection(next_socket_index, subscribers, poll, pool_token);
+        }
     }
 
     pub fn handle_client_readable(

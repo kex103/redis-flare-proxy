@@ -54,23 +54,30 @@ impl AdminPort {
     }
 
     pub fn accept_client_connection(&mut self, token_index: &Cell<usize>, poll: &mut Poll, subscribers: &mut HashMap<Token, Subscriber>) {
-        let (c, _) = match self.socket.accept() {
-            Ok(socket) => socket,
-            Err(error) => {
-                error!("Unable to accept admin client connection. Reason: {:?}", error);
-                return;
+        loop {
+            match self.socket.accept() {
+                Ok((s, _)) => {
+
+                    token_index.set(token_index.get() + SOCKET_INDEX_SHIFT);
+                    let token = Token(token_index.get().clone());
+                    match poll.register(&s, token, Ready::readable(), PollOpt::edge()) {
+                        Ok(_) => {}
+                        Err(error) => {
+                            error!("Failed to register admin client socket to poll. Reason: {:?}", error);
+                        }
+                    };
+                    subscribers.insert(token, Subscriber::AdminClient);
+                    self.client_sockets.insert(token, BufReader::new(s));
+                }
+                Err(error) => {
+                    if error.kind() == std::io::ErrorKind::WouldBlock {
+                        return;
+                    }
+                    error!("Unable to accept admin client connection. Reason: {:?}", error);
+                    return;
+                }
             }
-        };
-        token_index.set(token_index.get() + SOCKET_INDEX_SHIFT);
-        let token = Token(token_index.get().clone());
-        match poll.register(&c, token, Ready::readable(), PollOpt::edge()) {
-            Ok(_) => {}
-            Err(error) => {
-                error!("Failed to register admin client socket to poll. Reason: {:?}", error);
-            }
-        };
-        subscribers.insert(token, Subscriber::AdminClient);
-        self.client_sockets.insert(token, BufReader::new(c));
+        }
     }
 
     pub fn write_to_client(&mut self, client_token: ClientToken, message: String) {
