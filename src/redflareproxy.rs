@@ -37,6 +37,12 @@ pub enum Subscriber {
     AdminClient,
 }
 
+#[derive(Debug)]
+pub enum ProxyError {
+    InvalidConfig(String),
+    PollFailure(String),
+}
+
 pub fn generate_backend_token(
     next_socket_index: &Cell<usize>,
     backend_tokens: &RefCell<HashMap<BackendToken, PoolToken>>,
@@ -75,12 +81,12 @@ pub struct RedFlareProxy {
     running: bool,
 }
 impl RedFlareProxy {
-    pub fn new(config_path: String) -> Result<RedFlareProxy, String> {
+    pub fn new(config_path: String) -> Result<RedFlareProxy, ProxyError> {
         let config = try!(load_config(config_path));
         let poll = match Poll::new() {
             Ok(poll) => Rc::new(RefCell::new(poll)),
             Err(error) => {
-                return Err(format!("Failed to init poll: {:?}", error));
+                return Err(ProxyError::PollFailure(format!("Failed to init poll: {:?}", error)));
             }
         };
         let subscribers = Rc::new(RefCell::new(HashMap::new()));
@@ -109,16 +115,16 @@ impl RedFlareProxy {
         Ok(redflareproxy)
     }
 
-    pub fn switch_config(&mut self) -> Result<(), String> {
+    pub fn switch_config(&mut self) -> Result<(), ProxyError> {
         if self.staged_config.is_none() {
-            return Err("No staged config".to_owned());
+            return Err(ProxyError::InvalidConfig("No staged config".to_owned()));
         }
         // Check that configs aren't the same.
         {
             match self.staged_config {
                 Some(ref staged_config) => {
                     if staged_config == &self.config {
-                        return Err("The configs are the same!".to_owned());
+                        return Err(ProxyError::InvalidConfig("The configs are the same!".to_owned()));
                     }
                 }
                 None => {}
@@ -255,7 +261,7 @@ impl RedFlareProxy {
             Subscriber::PoolClient(pool_token) => {
                 debug!("PoolClient {:?} for Pool {:?}", token, pool_token);
                 match self.backendpools.get_mut(&pool_token) {
-                    Some(pool) => { pool.handle_client_readable(token); }
+                    Some(pool) => { let _ = pool.handle_client_readable(token); }
                     None => error!("HashMap says it has token but it really doesn't!"),
                 }
             }
@@ -335,12 +341,6 @@ impl RedFlareProxy {
         self.next_socket_index.get()
     }
 
-    pub fn load_config(&mut self, full_config_path: String) -> Result<(), String> {
-        let config = load_config(full_config_path).unwrap();
-        self.staged_config = Some(config);
-        Ok(())
-    }
-
     pub fn get_current_config(&self) -> RedFlareProxyConfig {
         self.config.clone()
     }
@@ -381,7 +381,8 @@ impl RedFlareProxy {
                     "Missing filepath argument!".to_owned()
                 } else {
                     let argument = next_line.unwrap();
-                    self.load_config(argument.to_owned()).unwrap();
+                    let config = load_config(argument.to_owned()).unwrap();
+                    self.staged_config = Some(config);
                     argument.to_owned()
                 }
             }
@@ -430,13 +431,17 @@ impl RedFlareProxy {
                     self.admin.write_to_client(token, response);
 
                 }
-                Err(message) => {
+                Err(ProxyError::InvalidConfig(message)) => {
                     let mut response = String::new();
                     response.push_str("-");
-                    response.push_str(message.as_str());
+                    response.push_str(&message);
                     response.push_str("\r\n");
                     self.admin.write_to_client(token, response);
-
+                }
+                Err(_) => {
+                    let mut response = String::new();
+                    response.push_str("-Unknown admin error\r\n");
+                    self.admin.write_to_client(token, response);
                 }
             }
         }

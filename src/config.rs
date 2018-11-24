@@ -3,6 +3,7 @@ use toml;
 use std::fs::File;
 use std::io::{Read};
 use hash::HashFunction;
+use redflareproxy::ProxyError;
 
 #[derive(Deserialize, Clone, Serialize, Eq, PartialEq, Hash)]
 pub enum Distribution {
@@ -80,28 +81,28 @@ pub struct AdminConfig {
     pub listen: String,
 }
 
-pub fn load_config(full_config_path: String) -> Result<RedFlareProxyConfig, String> {
+pub fn load_config(full_config_path: String) -> Result<RedFlareProxyConfig, ProxyError> {
     // TODO: Change to result
     // TOOD: trim config_path
     let config_path = full_config_path.trim();
     let mut file = match File::open(&config_path) {
         Ok(file) => file,
         Err(err) => {
-            return Err(format!("Really, I Failed to open file {}: {:?}", config_path, err));
+            return Err(ProxyError::InvalidConfig(format!("Really, I Failed to open file {}: {:?}", config_path, err)));
         }
     };
     let mut file_contents = String::new();
     match file.read_to_string(&mut file_contents) {
         Ok(_) => (),
         Err(err) => {
-            return Err(format!("Failed to read file {}: {:?}", config_path, err));
+            return Err(ProxyError::InvalidConfig(format!("Failed to read file {}: {:?}", config_path, err)));
         }
     };
     debug!("Config contents: {}", file_contents);
     let config: RedFlareProxyConfig = match toml::from_str(&file_contents) {
         Ok(config) => config,
         Err(err) => {
-            return Err(format!("Failed to convert file to toml {}: {:?}", config_path, err));
+            return Err(ProxyError::InvalidConfig(format!("Failed to convert file to toml {}: {:?}", config_path, err)));
         }
     };
     Ok(config)

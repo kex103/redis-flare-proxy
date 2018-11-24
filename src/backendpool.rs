@@ -1,3 +1,4 @@
+use redflareproxy::ProxyError;
 use redisprotocol::extract_redis_command2;
 use hash::hash;
 use redflareproxy::BackendToken;
@@ -327,7 +328,7 @@ pub fn shard<'a>(
         }
     }
 
-    let shard: Result<usize, String> = match config.distribution {
+    let shard: Result<usize, ProxyError> = match config.distribution {
         Distribution::Modula => Ok(hash(&config.hash_function, &tag) % total_weight), // Should be using key, not command.
         Distribution::Random => Ok(thread_rng().gen_range(0, total_weight - 1)),
         _ => panic!("Impossible to hit this with ketama!"),
@@ -355,7 +356,7 @@ pub fn shard<'a>(
                 None => panic!("Overflowed when determining shard!"),
             }
         }
-        Err(error) => debug!("Received {} while sharding!", error),
+        Err(error) => debug!("Received {:?} while sharding!", error),
     }
     Err(RedisError::Unknown)
 }
