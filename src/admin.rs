@@ -1,4 +1,4 @@
-use redflareproxy::{Subscriber, SOCKET_INDEX_SHIFT, SERVER};
+use redflareproxy::{ADMIN_LISTENER};
 use redflareproxy::{ClientToken};
 use config::{AdminConfig};
 
@@ -7,7 +7,6 @@ use bufreader::BufReader;
 use mio::tcp::{TcpListener, TcpStream};
 use hashbrown::HashMap;
 use std::io::Write;
-use std::cell::Cell;
 
 pub struct AdminPort {
     pub client_sockets: HashMap<ClientToken, BufReader<TcpStream>>,
@@ -16,7 +15,7 @@ pub struct AdminPort {
 }
 
 impl AdminPort {
-    pub fn new(config: AdminConfig, poll : &Poll, subscribers: &mut HashMap<Token, Subscriber>) -> AdminPort {
+    pub fn new(config: AdminConfig, poll : &Poll) -> AdminPort {
         /*let mut tcp_backlog = 128; // SOMAXCONN
         if config.get("tcp-backlog") != None {
             tcp_backlog = config["tcp-backlog"].as_integer().unwrap();
@@ -37,13 +36,12 @@ impl AdminPort {
             }
         };
 
-        match poll.register(&server_socket, SERVER, Ready::readable(), PollOpt::edge()) {
+        match poll.register(&server_socket, ADMIN_LISTENER, Ready::readable(), PollOpt::edge()) {
             Ok(_) => {}
             Err(error) => {
                 panic!("Failed to register admin listener socket to poll. Reason: {:?}", error);
             }
         };
-        subscribers.insert(SERVER, Subscriber::AdminListener);
         debug!("Registered admin socket.");
 
         AdminPort {
@@ -53,20 +51,17 @@ impl AdminPort {
         }
     }
 
-    pub fn accept_client_connection(&mut self, token_index: &Cell<usize>, poll: &mut Poll, subscribers: &mut HashMap<Token, Subscriber>) {
+    pub fn accept_client_connection(&mut self, next_admin_token: usize, poll: &mut Poll) {
         loop {
             match self.socket.accept() {
                 Ok((s, _)) => {
-
-                    token_index.set(token_index.get() + SOCKET_INDEX_SHIFT);
-                    let token = Token(token_index.get().clone());
+                    let token = Token(next_admin_token);
                     match poll.register(&s, token, Ready::readable(), PollOpt::edge()) {
                         Ok(_) => {}
                         Err(error) => {
                             error!("Failed to register admin client socket to poll. Reason: {:?}", error);
                         }
                     };
-                    subscribers.insert(token, Subscriber::AdminClient);
                     self.client_sockets.insert(token, BufReader::new(s));
                 }
                 Err(error) => {
