@@ -217,6 +217,56 @@ class TestRedFlareProxy(TestUtil):
         response = r3.execute_command("DBSIZE")
         self.assertEquals(response, 3)
 
+    def test_client_reclamation(self):
+        # This tests that client tokens are reclaimed properly.
+        # When a client connects, it gets assigned a vec index for the client. When it disconnects, it gets
+        # reclaimed.
+        # This tests that multiple clients connecitng, receiving requests, and then disconnecting, and reconnecting
+        # should be fine.
+        self.start_redis_server(6380)
+        self.start_proxy("tests/conf/testconfig1.toml")
+
+        TestUtil.verify_redis_connection(1531)
+
+        s1 = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        s1.settimeout(1)
+        s1.connect(("0.0.0.0", 1531))
+        s2 = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        s2.settimeout(1)
+        s2.connect(("0.0.0.0", 1531))
+        s1.send(b"*2\r\n$3\r\nGET\r\n$3\r\nhi1\r\n")
+        s1.recv(1024)
+        s2.send(b"*2\r\n$3\r\nGET\r\n$3\r\nhi2\r\n")
+        s1.close()
+        s2.recv(1024)
+        s3 = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        s3.settimeout(1)
+        s3.connect(("0.0.0.0", 1531))
+        s3.send(b"*2\r\n$3\r\nGET\r\n$3\r\nhi3\r\n")
+        s3.recv(1024)
+        s3.send(b"*2\r\n$3\r\nGET\r\n$3\r\nhi3\r\n")
+        s3.recv(1024)
+        s3.send(b"*2\r\n$3\r\nGET\r\n$3\r\nhi3\r\n")
+        s2.send(b"*2\r\n$3\r\nGET\r\n$3\r\nhi2\r\n")
+        s3.close()
+        s2.recv(1024)
+"""
+        pool1 = redis.ConnectionPool(host='0.0.0.0', port=1531, db=0)
+        pool2 = redis.ConnectionPool(host='0.0.0.0', port=1531, db=0)
+        pool3 = redis.ConnectionPool(host='0.0.0.0', port=1531, db=0)
+        client1 = redis.Redis(connection_pool=pool1)
+        client2 = redis.Redis(connection_pool=pool2)
+
+        client1.get('hi1')
+        client2.get('hi2')
+        pool1.disconnect()
+        client3 = redis.Redis(connection_pool=pool3)
+        client3.get('hi3')
+        pool2.disconnect()
+"""
+
+
+
 # Test multiple backends, 
 if __name__ == "__main__":
     TestRedFlareProxy.setupClass()

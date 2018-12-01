@@ -1,6 +1,6 @@
+use hashbrown::HashMap;
 use redflareproxy::ClientToken;
 use redflareproxy::BackendToken;
-use redflareproxy::convert_token_to_client_index;
 use redflareproxy::Client;
 use bufreader::BufReader;
 use redflareproxy::{NULL_TOKEN};
@@ -115,7 +115,7 @@ impl Backend {
         }
     }
 
-    pub fn handle_timeout(&mut self, token: Token, clients: &mut Vec<(Client, usize)>, cluster_backends: &mut Vec<(SingleBackend, usize)>, num_pools: usize, num_backends: usize) -> bool {
+    pub fn handle_timeout(&mut self, token: Token, clients: &mut HashMap<usize, (Client, usize)>, cluster_backends: &mut Vec<(SingleBackend, usize)>, num_pools: usize, num_backends: usize) -> bool {
         match self.single {
             BackendEnum::Single(ref mut backend) => backend.handle_timeout(clients, num_pools, num_backends),
             BackendEnum::Cluster(ref mut backend) => backend.handle_timeout(token, clients, cluster_backends, num_pools, num_backends),
@@ -138,7 +138,7 @@ impl Backend {
     pub fn handle_backend_response(
         &mut self,
         token: BackendToken,
-        clients: &mut Vec<(Client, usize)>,
+        clients: &mut HashMap<usize, (Client, usize)>,
         next_cluster_token_value: &mut usize,
         cluster_backends: &mut Vec<(SingleBackend, usize)>,
         num_pools: usize,
@@ -155,7 +155,7 @@ impl Backend {
     pub fn handle_backend_failure(
         &mut self,
         token: Token,
-        clients: &mut Vec<(Client, usize)>,
+        clients: &mut HashMap<usize, (Client, usize)>,
         cluster_backends: &mut Vec<(SingleBackend, usize)>,
         num_pools: usize,
         num_backends: usize
@@ -325,7 +325,7 @@ impl SingleBackend {
     // Returns a boolean, signifying whether to mark this backend as down or not.
     pub fn handle_timeout(
         &mut self,
-        clients: &mut Vec<(Client, usize)>,
+        clients: &mut HashMap<usize, (Client, usize)>,
         num_pools: usize,
         num_backends: usize,
     ) -> bool {
@@ -382,8 +382,7 @@ impl SingleBackend {
 
             if head.0 != NULL_TOKEN {
                 debug!("Trying to find client: {:?}", (head.0));
-                let client_index = convert_token_to_client_index(num_pools, num_backends, (head.0).0);
-                let (client, _) = clients.get_mut(client_index).unwrap();
+                let (client, _) = clients.get_mut(&(head.0).0).unwrap();
                 write_to_client(client, b"-ERR Proxy timed out\r\n");
             }
 
@@ -410,7 +409,7 @@ impl SingleBackend {
 
     // Marks the backend as down. Returns an error message to all pending requests.
     // TODO: Is it still needed to have a mark_backend_down AND handle_backend_failure?
-    pub fn mark_backend_down(&mut self, clients: &mut Vec<(Client, usize)>, num_backends: usize) {
+    pub fn mark_backend_down(&mut self, clients: &mut HashMap<usize, (Client, usize)>, num_backends: usize) {
         if self.socket.is_some() {
             let err = self.socket.as_mut().unwrap().get_mut().take_error();
             debug!("Previous socket error: {:?}", err);
@@ -424,7 +423,7 @@ impl SingleBackend {
             match possible_token {
                 Some((NULL_TOKEN, _)) => {}
                 Some((client_token, _)) => {
-                    let (ref mut client, _) = clients.get_mut(client_token.0).unwrap();
+                    let (ref mut client, _) = clients.get_mut(&client_token.0).unwrap();
                     write_to_client(client, b"-ERR: Unavailable backend.\r\n");
                 }
                 None => break,
@@ -453,7 +452,7 @@ impl SingleBackend {
         }
     }
 
-    pub fn handle_backend_response(&mut self, clients: &mut Vec<(Client, usize)>, num_pools: usize, num_backends: usize) -> VecDeque<String> {
+    pub fn handle_backend_response(&mut self, clients: &mut HashMap<usize, (Client, usize)>, num_pools: usize, num_backends: usize) -> VecDeque<String> {
         self.change_state(BackendStatus::CONNECTED, num_backends);
 
         let mut unhandled_internal_responses = VecDeque::new();
@@ -480,7 +479,7 @@ impl SingleBackend {
         return unhandled_internal_responses;
     }
 
-    pub fn handle_backend_failure(&mut self, clients: &mut Vec<(Client, usize)>, num_pools: usize, num_backends: usize) {
+    pub fn handle_backend_failure(&mut self, clients: &mut HashMap<usize, (Client, usize)>, num_pools: usize, num_backends: usize) {
         self.mark_backend_down(clients, num_pools);
         self.retry_connect(num_backends);
     }
@@ -639,7 +638,7 @@ fn change_state(token: &Token, status: &mut BackendStatus, target_state: Backend
 
 fn route_backend_response(
     stream: &mut Option<BufReader<TcpStream>>,
-    clients: &mut Vec<(Client, usize)>,
+    clients: &mut HashMap<usize, (Client, usize)>,
     num_pools: usize,
     num_backends: usize,
     queue: &mut VecDeque<(Token, Instant)>,
@@ -682,14 +681,13 @@ fn route_backend_response(
                         unhandled_internal_responses
                     );
                 } else {
-                    let client_index = convert_token_to_client_index(num_pools, num_backends, client_token.0);
-                    debug!("Client index: {:?}", client_index);
-                    match clients.get_mut(client_index) {
+                    debug!("Client token: {:?}", client_token);
+                    match clients.get_mut(&client_token.0) {
                         Some((stream, _)) => {
                             debug!("Wrote to client {:?}: {:?}", client_token, std::str::from_utf8(response));
                             let _ = stream.get_mut().write(response);
                         }
-                        None => panic!("Found listener instead of stream! for clienttoken {:?}", client_token),
+                        None => panic!("No client found for clienttoken {:?}", client_token),
                     }
                 }
                 response.len()

@@ -17,7 +17,7 @@ class ClusterTests(TestUtil):
         self.initialize_redis_cluster([7000, 7001, 7002])
         self.start_proxy("tests/conf/cluster1.toml")
 
-        TestUtil.verify_redis_connection(1533)
+        #TestUtil.verify_redis_connection(1533)
 
         TestUtil.populate_redis_key(1533, "key1")
         self.assert_redis_key(1533, "key1")

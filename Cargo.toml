@@ -37,3 +37,6 @@ path = "src/main.rs"
 [[bin]]
 name = "redflare-benchmark"
 path = "src/benchmark/main.rs"
+
+[profile.release]
+lto = true

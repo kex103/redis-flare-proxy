@@ -1,3 +1,4 @@
+use redflareproxy::PoolTokenValue;
 use redflareproxy::convert_token_to_cluster_index;
 use redflareproxy::Client;
 use redflareproxy::{BackendToken, ClientToken, NULL_TOKEN};
@@ -218,12 +219,13 @@ pub struct ClusterBackend {
     config: BackendConfig,
     token: BackendToken,
     queue: VecDeque<(ClientToken, Instant)>,
-    pool_token: usize,
+    pool_token: PoolTokenValue,
     // Following are stored for future backend connections that can be established.
     timeout: usize,
     failure_limit: usize,
     retry_timeout: usize,
     poll_registry: Rc<RefCell<Poll>>,
+
 }
 impl ClusterBackend {
     pub fn new(
@@ -328,7 +330,7 @@ impl ClusterBackend {
     pub fn handle_backend_response(
         &mut self,
         backend_token: BackendToken,
-        clients: &mut Vec<(Client, usize)>,
+        clients: &mut HashMap<usize, (Client, usize)>,
         next_cluster_token_value: &mut usize,
         cluster_backends: &mut Vec<(SingleBackend, usize)>,
         num_pools: usize,
@@ -374,7 +376,7 @@ impl ClusterBackend {
     pub fn handle_backend_failure(
         &mut self,
         backend_token: BackendToken,
-        clients: &mut Vec<(Client, usize)>,
+        clients: &mut HashMap<usize, (Client, usize)>,
         cluster_backends: &mut Vec<(SingleBackend, usize)>,
         num_pools: usize,
         num_backends: usize) {
@@ -415,7 +417,7 @@ impl ClusterBackend {
     pub fn handle_timeout(
         &mut self,
         backend_token: BackendToken,
-        clients: &mut Vec<(Client, usize)>,
+        clients: &mut HashMap<usize, (Client, usize)>,
         cluster_backends: &mut Vec<(SingleBackend, usize)>,
         num_pools: usize,
         num_backends: usize,

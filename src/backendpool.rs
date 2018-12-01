@@ -1,3 +1,5 @@
+use redflareproxy::PoolTokenValue;
+use redflareproxy::ClientTokenValue;
 use backend::SingleBackend;
 use redflareproxy::ClientToken;
 use redflareproxy::FIRST_SOCKET_INDEX;
@@ -92,38 +94,39 @@ impl BackendPool {
     pub fn accept_client_connection(
         &mut self,
         poll: &Rc<RefCell<Poll>>,
-        clients: &mut Vec<(Client, usize)>,
-        num_pools: usize,
-        num_backends: usize,
+        next_client_token_value: &mut ClientTokenValue,
+        clients: &mut HashMap<ClientTokenValue, (Client, PoolTokenValue)>,
     ) {
-        match self.listen_socket {
-            Some(ref mut listener) => {
-                loop {
-                    let mut stream = match listener.accept() {
-                        Ok(s) => s.0,
-                        Err(e) => {
-                            if e.kind() == std::io::ErrorKind::WouldBlock {
-                                return;
+        loop {
+            match self.listen_socket {
+                Some(ref mut listener) => {
+                    loop {
+                        let mut stream = match listener.accept() {
+                            Ok(s) => s.0,
+                            Err(e) => {
+                                if e.kind() == std::io::ErrorKind::WouldBlock {
+                                    return;
+                                }
+                                panic!("Failed for some reason {:?}", e);
                             }
-                            panic!("Failed for some reason {:?}", e);
-                        }
-                    };
-                    //let client_index = clients.len();
-                    let client_token = Token(clients.len() + FIRST_SOCKET_INDEX + num_pools + 3*num_backends);
-                    match poll.borrow_mut().register(&stream, client_token, Ready::readable(), PollOpt::edge()) {
-                        Ok(_) => {
-                            clients.push((BufReader::new(stream), self.token.0));
-                            info!("Backend Connection accepted: client {:?}", client_token);
-                        }
-                        Err(err) => {
-                            error!("Failed to register client token to poll: {:?}", err);
-                        }
-                    };
+                        };
+                        let client_token = Token(*next_client_token_value);
+                        *next_client_token_value += 1;
+                        match poll.borrow_mut().register(&stream, client_token, Ready::readable(), PollOpt::edge()) {
+                            Ok(_) => {
+                                clients.insert(client_token.0, (BufReader::new(stream), self.token.0));
+                                info!("Backend Connection accepted: client {:?}", client_token);
+                            }
+                            Err(err) => {
+                                error!("Failed to register client token to poll: {:?}", err);
+                            }
+                        };
+                    }
                 }
-            }
-            None => {
-                error!("Listen socket is no more when accepting!");
-                return
+                None => {
+                    error!("Listen socket is no more when accepting!");
+                    return
+                }
             }
         }
     }
@@ -235,7 +238,7 @@ fn get_tag<'a>(key: &'a [u8], tags: &String) -> &'a [u8] {
 pub fn handle_timeout(
     backend: &mut Backend,
     backend_token: BackendToken,
-    clients: &mut Vec<(Client, usize)>,
+    clients: &mut HashMap<usize, (Client, usize)>,
     cluster_backends: &mut Vec<(SingleBackend, usize)>,
     num_pools: usize,
     num_backends: usize,
@@ -248,7 +251,7 @@ pub fn handle_timeout(
 fn mark_backend_down(
     backend: &mut Backend,
     token: BackendToken,
-    clients: &mut Vec<(Client, usize)>,
+    clients: &mut HashMap<usize, (Client, usize)>,
     cluster_backends: &mut Vec<(SingleBackend, usize)>,
     num_pools: usize,
     num_backends: usize,
