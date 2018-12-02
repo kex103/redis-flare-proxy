@@ -672,6 +672,7 @@ pub fn init_backend(
         pool_config.failure_limit,
         pool_config.retry_timeout,
         pool_token_value,
+        num_backends,
     );
     backend.connect(cluster_backends, num_backends);
     return backend;

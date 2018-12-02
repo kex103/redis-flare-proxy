@@ -238,6 +238,7 @@ impl ClusterBackend {
         failure_limit: usize,
         retry_timeout: usize,
         pool_token: usize,
+        num_backends: usize,
     ) -> (ClusterBackend, Vec<BackendToken>) {
         let mut cluster = ClusterBackend {
             hostnames: HashMap::new(),
@@ -270,6 +271,7 @@ impl ClusterBackend {
                 failure_limit,
                 retry_timeout,
                 pool_token,
+                num_backends,
             );
             cluster_backends.push((single, token.0));
             cluster.hostnames.insert(host.clone(), backend_token);
@@ -280,7 +282,7 @@ impl ClusterBackend {
         (cluster, all_backend_tokens)
     }
 
-    fn initialize_host(&mut self, host: Host, next_cluster_token_value: &mut usize, cluster_backends: &mut Vec<(SingleBackend, usize)>) {
+    fn initialize_host(&mut self, host: Host, next_cluster_token_value: &mut usize, cluster_backends: &mut Vec<(SingleBackend, usize)>, num_backends: usize) {
         let backend_token = Token(*next_cluster_token_value);
         *next_cluster_token_value += 1;
             let (single, _) = SingleBackend::new(
@@ -292,6 +294,7 @@ impl ClusterBackend {
                 self.failure_limit,
                 self.retry_timeout,
                 self.pool_token,
+                num_backends,
             );
         cluster_backends.push((single, self.token.0));
         self.hostnames.insert(host.clone(), backend_token.clone());
@@ -359,7 +362,7 @@ impl ClusterBackend {
                     }
 
                     if !self.hostnames.contains_key(&host) {
-                        self.initialize_host(host.clone(), next_cluster_token_value, cluster_backends);
+                        self.initialize_host(host.clone(), next_cluster_token_value, cluster_backends, num_backends);
                         let backend_token = self.hostnames.get(&host).unwrap();
                         let cluster_index = convert_token_to_cluster_index(backend_token.0);
                         cluster_backends.get_mut(cluster_index).unwrap().0.connect(num_backends);
