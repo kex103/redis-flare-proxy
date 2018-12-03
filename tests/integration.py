@@ -181,7 +181,6 @@ class TestRedFlareProxy(TestUtil):
         self.assertTrue(response)
         response = r.execute_command("SWITCHCONFIG")
         self.assertTrue(response)
-        time.sleep(0.1)
 
         TestUtil.populate_redis_key(1531, "key1")
         TestUtil.populate_redis_key(1531, "key2")

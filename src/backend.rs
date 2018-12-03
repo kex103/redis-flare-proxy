@@ -1,4 +1,3 @@
-use redflareproxy::PoolTokenValue;
 use hashbrown::HashMap;
 use redflareproxy::ClientToken;
 use redflareproxy::BackendToken;
@@ -50,7 +49,6 @@ impl Backend {
         failure_limit: usize,
         retry_timeout: usize,
         pool_token: usize,
-        num_backends: usize,
     ) -> (Backend, Vec<Token>) {
         let weight = config.weight;
         let (backend, all_backend_tokens) = match config.use_cluster {
@@ -65,7 +63,6 @@ impl Backend {
                     failure_limit,
                     retry_timeout,
                     pool_token,
-                    num_backends,
                 );
                 (BackendEnum::Single(backend), tokens)
             }
@@ -80,7 +77,6 @@ impl Backend {
                     failure_limit,
                     retry_timeout,
                     pool_token,
-                    num_backends,
                 );
                 (BackendEnum::Cluster(backend), tokens)
             }
@@ -184,8 +180,8 @@ pub struct SingleBackend {
     pool_token: usize,
     poll_registry: Rc<RefCell<Poll>>,
     socket: Option<BufReader<TcpStream>>,
-    timer: Timer<Instant>,
-    retry_timer: Timer<Instant>,
+    timer: Option<Timer<Instant>>,
+    retry_timer: Option<Timer<Instant>>,
     pub timeout: usize,
     waiting_for_auth_resp: bool,
     waiting_for_db_resp: bool,
@@ -200,8 +196,7 @@ impl SingleBackend {
         timeout: usize,
         failure_limit: usize,
         retry_timeout: usize,
-        pool_token: PoolTokenValue,
-        num_backends: usize,
+        pool_token: usize,
     ) -> (SingleBackend, Vec<Token>) {
         debug!("Initialized Backend: token: {:?}", token);
         // TODO: Configure message queue size per backend.
@@ -219,18 +214,12 @@ impl SingleBackend {
             config: config,
             pool_token: pool_token,
             socket: None,
-            timer: create_timer(),
-            retry_timer: create_timer(),
+            timer: None,
+            retry_timer: None,
             waiting_for_auth_resp: false,
             waiting_for_db_resp: false,
             waiting_for_ping_resp: false,
         };
-
-        let timer_token = Token(backend.token.0 + num_backends);
-        backend.poll_registry.borrow_mut().register(&backend.retry_timer, timer_token, Ready::readable(), PollOpt::edge()).unwrap();
-
-        let timer_token = Token(backend.token.0 + 2*num_backends);
-        backend.poll_registry.borrow_mut().register(&backend.timer, timer_token, Ready::readable(), PollOpt::edge()).unwrap();
         (backend, Vec::new())
     }
 
@@ -242,8 +231,18 @@ impl SingleBackend {
             }
             None => {}
         }
-        let _ = self.poll_registry.borrow_mut().reregister(&self.retry_timer, Token(new_token.0 + num_backends), Ready::readable(), PollOpt::edge());
-        let _ = self.poll_registry.borrow_mut().reregister(&self.timer, Token(new_token.0 + 2* num_backends), Ready::readable(), PollOpt::edge());
+        match self.retry_timer {
+            Some(ref t) => {
+                let _ = self.poll_registry.borrow_mut().reregister(t, Token(new_token.0 + num_backends), Ready::readable(), PollOpt::edge());
+            }
+            None => {}
+        }
+        match self.timer {
+            Some(ref t) => {
+                let _ = self.poll_registry.borrow_mut().reregister(t, Token(new_token.0 + 2* num_backends), Ready::readable(), PollOpt::edge());
+            }
+            None => {}
+        }
         // TODO: bubble up error.
         return Ok(());
     }
@@ -333,14 +332,14 @@ impl SingleBackend {
         debug!("Handling ReqestTimeout for Backend {:?}", self.token);
 
         if self.status == BackendStatus::DISCONNECTED {
-            self.timer = create_timer();
+            self.timer = None;
             return false;
         }
         if self.queue.len() == 0 {
             return false;
         }
         loop {
-            let timer_poll = self.timer.poll();
+            let timer_poll = self.timer.as_mut().unwrap().poll();
             let target_timestamp = match timer_poll {
                 None => {
                     // TODO: For some reason, poll says timer is activated,but timer itself doesn't think so.
@@ -486,9 +485,29 @@ impl SingleBackend {
     }
 
     fn retry_connect(&mut self, num_backends: usize) {
+        debug!("Creating timer");
+        // Create new timer.
+        if self.retry_timer.is_none() {
+            let timer = create_timer();
+            let timer_token = Token(self.token.0 + num_backends);
+            self.poll_registry.borrow_mut().register(&timer, timer_token, Ready::readable(), PollOpt::edge()).unwrap();
+            self.retry_timer = Some(timer);
+        }
+
         let now = Instant::now();  
         let timestamp = now + Duration::from_millis(self.retry_timeout as u64);
-        let _ = self.retry_timer.set_timeout(Duration::new(0, (1000000 * self.retry_timeout) as u32), timestamp);
+        match self.retry_timer {
+            Some(ref mut timer) => {
+                let _ = timer.set_timeout(Duration::new(0, (1000000 * self.retry_timeout) as u32), timestamp);
+            }
+            None => { panic!("impossible"); }
+        }
+        // need to handle with specific function for token. How to know what token this is?
+        // can stuff into sockets. but it'll ahve timer token.
+
+        //let parent_token = self.pool_token.clone();
+        debug!("Original: {:?}", self.pool_token);
+        //let timer_token = Token(self.token.0 + 1);
     }
 
     pub fn change_state(&mut self, target_state: BackendStatus, num_backends: usize) -> bool {
@@ -544,8 +563,21 @@ impl SingleBackend {
         let timestamp = now + Duration::from_millis(self.timeout as u64);
         self.queue.push_back((client_token, timestamp));
         if self.queue.len() == 1 && self.timeout != 0 {
-            let _ = self.timer.set_timeout(Duration::from_millis(self.timeout as u64), timestamp);
-            debug!("Setting timeout: {:?}", timestamp);
+            if self.timer.is_none() {
+                let timer = create_timer();
+                let timer_token = Token(self.token.0 + 2*num_backends);
+                debug!("Registered timer: {:?}", timer_token);
+                self.poll_registry.borrow_mut().register(&timer, timer_token, Ready::readable(), PollOpt::edge()).unwrap();
+                self.timer = Some(timer);
+            }
+
+            match self.timer {
+                Some(ref mut timer) => {
+                    let _ = timer.set_timeout(Duration::from_millis(self.timeout as u64), timestamp);
+                    debug!("Setting timeout: {:?}", timestamp);
+                }
+                None => { panic!("impossible"); }
+            }
         }
     }
 }
