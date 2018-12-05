@@ -53,7 +53,7 @@ impl Backend {
         let weight = config.weight;
         let (backend, all_backend_tokens) = match config.use_cluster {
             false => {
-                let host = config.host.clone().unwrap().clone();
+                let host = config.host.clone();
                 let (backend, tokens) = SingleBackend::new(
                     config,
                     host,
@@ -108,17 +108,17 @@ impl Backend {
         }
     }
 
-    pub fn connect(&mut self, cluster_backends: &mut Vec<(SingleBackend, usize)>, num_pools: usize) {
+    pub fn connect(&mut self, cluster_backends: &mut Vec<(SingleBackend, usize)>) {
         match self.single {
-            BackendEnum::Single(ref mut backend) => backend.connect(num_pools),
-            BackendEnum::Cluster(ref mut backend) => backend.connect(cluster_backends, num_pools),
+            BackendEnum::Single(ref mut backend) => backend.connect(),
+            BackendEnum::Cluster(ref mut backend) => backend.connect(cluster_backends),
         }
     }
 
-    pub fn handle_timeout(&mut self, token: Token, clients: &mut HashMap<usize, (Client, usize)>, cluster_backends: &mut Vec<(SingleBackend, usize)>, num_pools: usize, num_backends: usize) -> bool {
+    pub fn handle_timeout(&mut self, token: Token, clients: &mut HashMap<usize, (Client, usize)>, cluster_backends: &mut Vec<(SingleBackend, usize)>) -> bool {
         match self.single {
-            BackendEnum::Single(ref mut backend) => backend.handle_timeout(clients, num_pools, num_backends),
-            BackendEnum::Cluster(ref mut backend) => backend.handle_timeout(token, clients, cluster_backends, num_pools, num_backends),
+            BackendEnum::Single(ref mut backend) => backend.handle_timeout(clients),
+            BackendEnum::Cluster(ref mut backend) => backend.handle_timeout(token, clients, cluster_backends),
         }
     }
 
@@ -141,14 +141,11 @@ impl Backend {
         clients: &mut HashMap<usize, (Client, usize)>,
         next_cluster_token_value: &mut usize,
         cluster_backends: &mut Vec<(SingleBackend, usize)>,
-        num_pools: usize,
         num_backends: usize
     ) {
         match self.single {
-            BackendEnum::Single(ref mut backend) => {
-                backend.handle_backend_response(clients, num_pools, num_backends);
-            }
-            BackendEnum::Cluster(ref mut backend) => backend.handle_backend_response(token, clients, next_cluster_token_value, cluster_backends, num_pools, num_backends),
+            BackendEnum::Single(ref mut backend) => { backend.handle_backend_response(clients, num_backends); }
+            BackendEnum::Cluster(ref mut backend) => backend.handle_backend_response(token, clients, next_cluster_token_value, cluster_backends, num_backends),
         };
     }
 
@@ -157,12 +154,11 @@ impl Backend {
         token: Token,
         clients: &mut HashMap<usize, (Client, usize)>,
         cluster_backends: &mut Vec<(SingleBackend, usize)>,
-        num_pools: usize,
-        num_backends: usize
+        num_backends: usize,
     ) {
         match self.single {
-            BackendEnum::Single(ref mut backend) => backend.handle_backend_failure(clients, num_pools, num_backends),
-            BackendEnum::Cluster(ref mut backend) => backend.handle_backend_failure(token, clients, cluster_backends, num_pools, num_backends),
+            BackendEnum::Single(ref mut backend) => backend.handle_backend_failure(clients, num_backends),
+            BackendEnum::Cluster(ref mut backend) => backend.handle_backend_failure(token, clients, cluster_backends, num_backends),
         }
     }
 }
@@ -257,7 +253,6 @@ impl SingleBackend {
 
     pub fn connect(
         &mut self,
-        num_backends: usize,
     ) {
         if self.status == BackendStatus::READY || self.status == BackendStatus::CONNECTED {
             debug!("Trying to connect when already connected!");
@@ -274,7 +269,7 @@ impl SingleBackend {
         self.poll_registry.borrow_mut().register(&socket, self.token, Ready::readable() | Ready::writable(), PollOpt::edge()).unwrap();
         self.socket = Some(BufReader::new(socket));
 
-        self.change_state(BackendStatus::CONNECTING, num_backends);
+        change_state(&mut self.status, BackendStatus::CONNECTING);
     }
 
     // Callback after initializing a connection.
@@ -317,7 +312,7 @@ impl SingleBackend {
         }
 
         if !wait_for_resp {
-            self.change_state(BackendStatus::READY, num_backends);
+            change_state(&mut self.status, BackendStatus::READY);
         }
     }
 
@@ -326,8 +321,6 @@ impl SingleBackend {
     pub fn handle_timeout(
         &mut self,
         clients: &mut HashMap<usize, (Client, usize)>,
-        num_pools: usize,
-        num_backends: usize,
     ) -> bool {
         debug!("Handling ReqestTimeout for Backend {:?}", self.token);
 
@@ -376,8 +369,8 @@ impl SingleBackend {
             debug!("queue size is now: {:?}", self.queue.len());
 
             if head.0 == NULL_TOKEN && (self.waiting_for_db_resp || self.waiting_for_auth_resp || self.waiting_for_ping_resp) {
-                self.change_state(BackendStatus::DISCONNECTED, num_backends);
-                self.connect(num_backends);
+                change_state(&mut self.status, BackendStatus::DISCONNECTED);
+                self.connect();
             }
 
             if head.0 != NULL_TOKEN {
@@ -409,12 +402,12 @@ impl SingleBackend {
 
     // Marks the backend as down. Returns an error message to all pending requests.
     // TODO: Is it still needed to have a mark_backend_down AND handle_backend_failure?
-    pub fn mark_backend_down(&mut self, clients: &mut HashMap<usize, (Client, usize)>, num_backends: usize) {
+    pub fn mark_backend_down(&mut self, clients: &mut HashMap<usize, (Client, usize)>) {
         if self.socket.is_some() {
             let err = self.socket.as_mut().unwrap().get_mut().take_error();
             debug!("Previous socket error: {:?}", err);
         }
-        self.change_state(BackendStatus::DISCONNECTED, num_backends);
+        change_state(&mut self.status, BackendStatus::DISCONNECTED);
 
         self.failure_count = 0;
 
@@ -452,8 +445,12 @@ impl SingleBackend {
         }
     }
 
-    pub fn handle_backend_response(&mut self, clients: &mut HashMap<usize, (Client, usize)>, num_pools: usize, num_backends: usize) -> VecDeque<String> {
-        self.change_state(BackendStatus::CONNECTED, num_backends);
+    pub fn handle_backend_response(&mut self, clients: &mut HashMap<usize, (Client, usize)>, num_backends: usize) -> VecDeque<String> {
+        let prev_state = self.status;
+        change_state(&mut self.status, BackendStatus::CONNECTED);
+        if prev_state == BackendStatus::CONNECTING && self.status == BackendStatus::CONNECTED {
+            self.handle_connection(num_backends);
+        }
 
         let mut unhandled_internal_responses = VecDeque::new();
 
@@ -462,10 +459,7 @@ impl SingleBackend {
             let a = route_backend_response(
                 &mut self.socket,
                 clients,
-                num_pools,
-                num_backends,
                 &mut self.queue,
-                &mut self.token,
                 &mut self.status,
                 &mut self.waiting_for_auth_resp,
                 &mut self.waiting_for_db_resp,
@@ -479,8 +473,8 @@ impl SingleBackend {
         return unhandled_internal_responses;
     }
 
-    pub fn handle_backend_failure(&mut self, clients: &mut HashMap<usize, (Client, usize)>, num_pools: usize, num_backends: usize) {
-        self.mark_backend_down(clients, num_pools);
+    pub fn handle_backend_failure(&mut self, clients: &mut HashMap<usize, (Client, usize)>, num_backends: usize) {
+        self.mark_backend_down(clients);
         self.retry_connect(num_backends);
     }
 
@@ -508,42 +502,6 @@ impl SingleBackend {
         //let parent_token = self.pool_token.clone();
         debug!("Original: {:?}", self.pool_token);
         //let timer_token = Token(self.token.0 + 1);
-    }
-
-    pub fn change_state(&mut self, target_state: BackendStatus, num_backends: usize) -> bool {
-        // TODO: Rethink change state flow.
-        if self.status == target_state {
-            return true;
-        }
-        let prev_status = self.status;
-        match (self.status, target_state) {
-            // called when trying to establish a connection to backend.
-            (BackendStatus::DISCONNECTED, BackendStatus::CONNECTING) => {}
-             // happens when connection to backend has been established and is writable.
-            (BackendStatus::CONNECTING, BackendStatus::CONNECTED) => {}
-            // Happens when writable connection is validated with a PING (if timeout is enabled)
-            (BackendStatus::CONNECTED, BackendStatus::READY) => {}
-            (BackendStatus::READY, BackendStatus::CONNECTED) => { return true; }
-            // Happens when the establishing connection to backend has timed out.
-            (BackendStatus::CONNECTING, BackendStatus::DISCONNECTED) => {}
-            // happens when host fails initializing PING
-            (BackendStatus::CONNECTED, BackendStatus::DISCONNECTED) => {}
-            // happens when host has been blacked out from too many failures/timeouts.
-            (BackendStatus::READY, BackendStatus::DISCONNECTED) => {}
-            _ => {
-                debug!("Backend {:?} failed to change state from {:?} to {:?}", self.token, self.status, target_state);
-                panic!("Failure to change states"); //return false;
-            }
-        }
-        debug!("Backend {:?} changed state from {:?} to {:?}", self.token, self.status, target_state);
-        self.status = target_state;
-        match (prev_status, target_state) {
-            (BackendStatus::CONNECTING, BackendStatus::CONNECTED) => {
-                self.handle_connection(num_backends);
-            }
-            _ => {}
-        }
-        return true;
     }
 
     fn write_to_stream(
@@ -586,7 +544,7 @@ fn write_to_client(client_stream: &mut Client, message: &[u8]) {
     let _ = client_stream.get_mut().write(message);
 }
 
-fn handle_internal_response(token: &Token, status: &mut BackendStatus, waiting_for_auth_resp: &mut bool, waiting_for_db_resp: &mut bool, waiting_for_ping_resp: &mut bool, response: &[u8], unhandled_queue: &mut VecDeque<String>) {
+fn handle_internal_response(status: &mut BackendStatus, waiting_for_auth_resp: &mut bool, waiting_for_db_resp: &mut bool, waiting_for_ping_resp: &mut bool, response: &[u8], unhandled_queue: &mut VecDeque<String>) {
     // TODO: Handle the various requirements.
     if *waiting_for_auth_resp && response == b"+OK\r\n" {
         *waiting_for_auth_resp = false;
@@ -602,14 +560,14 @@ fn handle_internal_response(token: &Token, status: &mut BackendStatus, waiting_f
         return;
     }
     if !*waiting_for_auth_resp && !*waiting_for_db_resp && !*waiting_for_ping_resp {
-        change_state(token, status, BackendStatus::READY);
+        change_state(status, BackendStatus::READY);
     }
 }
 
-fn change_state(token: &Token, status: &mut BackendStatus, target_state: BackendStatus) -> bool {
+fn change_state(status: &mut BackendStatus, target_state: BackendStatus) -> bool {
     // TODO: Rethink change state flow.
     if *status == target_state {
-        return true;
+        return false;
     }
     let _prev_status = *status;
     match (*status, target_state) {
@@ -627,11 +585,11 @@ fn change_state(token: &Token, status: &mut BackendStatus, target_state: Backend
         // happens when host has been blacked out from too many failures/timeouts.
         (BackendStatus::READY, BackendStatus::DISCONNECTED) => {}
         _ => {
-            debug!("Backend {:?} failed to change state from {:?} to {:?}", token, status, target_state);
+            debug!("Backend failed to change state from {:?} to {:?}", status, target_state);
             panic!("Failure to change states"); //return false;
         }
     }
-    debug!("Backend {:?} changed state from {:?} to {:?}", token, status, target_state);
+    debug!("Backend changed state from {:?} to {:?}", status, target_state);
     *status = target_state;
     return true;
 }
@@ -639,10 +597,7 @@ fn change_state(token: &Token, status: &mut BackendStatus, target_state: Backend
 fn route_backend_response(
     stream: &mut Option<BufReader<TcpStream>>,
     clients: &mut HashMap<usize, (Client, usize)>,
-    num_pools: usize,
-    num_backends: usize,
     queue: &mut VecDeque<(Token, Instant)>,
-    token: &mut Token,
     status: &mut BackendStatus,
     waiting_for_auth_resp: &mut bool,
     waiting_for_db_resp: &mut bool,
@@ -672,7 +627,6 @@ fn route_backend_response(
 
                 if client_token == NULL_TOKEN {
                     handle_internal_response(
-                        token,
                         status,
                         waiting_for_auth_resp,
                         waiting_for_db_resp,

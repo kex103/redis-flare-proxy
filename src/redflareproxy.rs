@@ -136,7 +136,6 @@ impl RedFlareProxy {
                 &mut next_backend_token_value,
                 pool_token_value,
                 &mut redflareproxy.poll,
-                num_backends,
 
             );
             pool_token_value += 1;
@@ -278,7 +277,6 @@ impl RedFlareProxy {
                                 &mut next_backend_token_value,
                                 pool_token_value,
                                 &mut self.poll,
-                                num_backends,
                             );
                         }
                     }
@@ -343,7 +341,7 @@ impl RedFlareProxy {
                             return;
                         }
                     };
-                    backend.handle_backend_failure(token, &mut self.clients, &mut self.cluster_backends, num_pools, num_backends);
+                    backend.handle_backend_failure(token, &mut self.clients, &mut self.cluster_backends, num_backends);
                     return;
                 }
                 SubType::PoolClient => {
@@ -380,7 +378,7 @@ impl RedFlareProxy {
                 let token_id = token.0 - FIRST_SOCKET_INDEX - num_pools - num_backends;
                 match self.backends.get_mut(token_id) {
                     Some(backend) => {
-                        backend.connect(&mut self.cluster_backends, num_backends)
+                        backend.connect(&mut self.cluster_backends)
                     }
                     None => error!("HashMap says it has token but it really doesn't! {:?}",token),
                 }
@@ -393,7 +391,7 @@ impl RedFlareProxy {
                 let token_id = token.0 - FIRST_SOCKET_INDEX - num_pools - 2*num_backends;
                 match self.backends.get_mut(token_id) {
                     Some(backend) => {
-                        handle_timeout(backend, backend_token, &mut self.clients, &mut self.cluster_backends, num_pools, num_backends);
+                        handle_timeout(backend, backend_token, &mut self.clients, &mut self.cluster_backends, num_backends);
                     }
                     None => error!("HashMap says it has token but it really doesn't! {:?}", token),
                 }
@@ -413,7 +411,7 @@ impl RedFlareProxy {
                 let backend_index = convert_token_to_backend_index(num_pools, token.0);
                 let mut next_cluster_token_value = FIRST_CLUSTER_BACKEND_INDEX + self.cluster_backends.len();
                 match self.backends.get_mut(backend_index) {
-                    Some(b) => b.handle_backend_response(token, &mut self.clients, &mut next_cluster_token_value, &mut self.cluster_backends, self.backendpools.len(), num_backends),
+                    Some(b) => b.handle_backend_response(token, &mut self.clients, &mut next_cluster_token_value, &mut self.cluster_backends, num_backends),
                     None => error!("HashMap says it has token but it really doesn't!"),
                 }
             }
@@ -425,7 +423,7 @@ impl RedFlareProxy {
                 let pool_token_value = self.cluster_backends.get(cluster_index).unwrap().1;
                 let backend_index = convert_token_to_backend_index(num_pools, pool_token_value);
                 let mut next_cluster_token_value = FIRST_CLUSTER_BACKEND_INDEX + self.cluster_backends.len();
-                self.backends.get_mut(backend_index).unwrap().handle_backend_response(token, &mut self.clients, &mut next_cluster_token_value, &mut self.cluster_backends, num_pools, num_backends);
+                self.backends.get_mut(backend_index).unwrap().handle_backend_response(token, &mut self.clients, &mut next_cluster_token_value, &mut self.cluster_backends, num_backends);
             }
             SubType::AdminClient => {
                 debug!("AdminClient {:?}", token);
@@ -628,7 +626,6 @@ fn init_backend_pool(
     next_backend_token_value: &mut usize,
     pool_token_value: usize,
     poll: &Rc<RefCell<Poll>>,
-    num_backends: usize,
 ) {
     let pool_token = Token(pool_token_value);
     let mut pool = backendpool::BackendPool::new(pool_name.clone(), pool_token, pool_config.clone(), *next_backend_token_value);
@@ -641,7 +638,7 @@ fn init_backend_pool(
 
 
     for backend_config in pool_config.servers.clone() {
-        let backend = init_backend(backend_config, pool_config, cluster_backends, pool_token_value, backend_token_value, poll, num_backends);
+        let backend = init_backend(backend_config, pool_config, cluster_backends, pool_token_value, backend_token_value, poll);
         backends.push(backend);
         backend_token_value += 1;
         debug!("KEX: init_backend_pool Token_value now at {:?} backends len at {:?}", backend_token_value, backends.len());
@@ -657,7 +654,6 @@ pub fn init_backend(
     pool_token_value: usize,
     backend_token_value: usize,
     poll_registry: &Rc<RefCell<Poll>>,
-    num_backends: usize,
 ) -> Backend {
     // Initialize backends.
     let backend_token = Token(backend_token_value);
@@ -673,6 +669,6 @@ pub fn init_backend(
         pool_config.retry_timeout,
         pool_token_value,
     );
-    backend.connect(cluster_backends, num_backends);
+    backend.connect(cluster_backends);
     return backend;
 }

@@ -2,7 +2,6 @@ use redflareproxy::PoolTokenValue;
 use redflareproxy::ClientTokenValue;
 use backend::SingleBackend;
 use redflareproxy::ClientToken;
-use redflareproxy::FIRST_SOCKET_INDEX;
 use redflareproxy::Client;
 use redflareproxy::ProxyError;
 use redisprotocol::extract_redis_command2;
@@ -17,7 +16,6 @@ use mio::*;
 use mio::tcp::{TcpListener};
 use std::string::String;
 use std::io::{Write, BufRead};
-use std::time::{Instant};
 use hashbrown::HashMap;
 use conhash::*;
 use conhash::Node;
@@ -240,11 +238,10 @@ pub fn handle_timeout(
     backend_token: BackendToken,
     clients: &mut HashMap<usize, (Client, usize)>,
     cluster_backends: &mut Vec<(SingleBackend, usize)>,
-    num_pools: usize,
     num_backends: usize,
 ) {
-    if backend.handle_timeout(backend_token, clients, cluster_backends, num_pools, num_backends) {
-        mark_backend_down(backend, backend_token, clients, cluster_backends, num_pools, num_backends);
+    if backend.handle_timeout(backend_token, clients, cluster_backends) {
+        mark_backend_down(backend, backend_token, clients, cluster_backends, num_backends);
     }
 }
 
@@ -253,10 +250,9 @@ fn mark_backend_down(
     token: BackendToken,
     clients: &mut HashMap<usize, (Client, usize)>,
     cluster_backends: &mut Vec<(SingleBackend, usize)>,
-    num_pools: usize,
     num_backends: usize,
 ) {
-    backend.handle_backend_failure(token, clients, cluster_backends, num_pools, num_backends);
+    backend.handle_backend_failure(token, clients, cluster_backends, num_backends);
     //if self.config.auto_eject_hosts {
         //self.rebuild_pool_sharding();
     //}

@@ -57,7 +57,7 @@ pub struct BackendPoolConfig {
 }
 #[derive(Deserialize, Clone, Serialize, Eq, PartialEq, Hash)]
 pub struct BackendConfig {
-    pub host: Option<String>,
+    pub host: String,
 
     // How to handle RedisCluster list of hosts?
 

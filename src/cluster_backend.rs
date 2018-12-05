@@ -310,12 +310,12 @@ impl ClusterBackend {
         return self.status == BackendStatus::READY;
     }
 
-    pub fn connect(&mut self, cluster_backends: &mut Vec<(SingleBackend, usize)>, num_pools: usize) {
+    pub fn connect(&mut self, cluster_backends: &mut Vec<(SingleBackend, usize)>) {
         for backend_token in self.hostnames.values() {
             debug!("KEX: connecting for a host! {:?}", backend_token);
             let client_index = convert_token_to_cluster_index(backend_token.0);
             let ref mut backend = cluster_backends.get_mut(client_index).unwrap().0;
-            backend.connect(num_pools);
+            backend.connect();
         }
         self.change_state(BackendStatus::CONNECTING);
     }
@@ -333,19 +333,18 @@ impl ClusterBackend {
         clients: &mut HashMap<usize, (Client, usize)>,
         next_cluster_token_value: &mut usize,
         cluster_backends: &mut Vec<(SingleBackend, usize)>,
-        num_pools: usize,
         num_backends: usize
     ) {
         debug!("Queue: {:?}", self.queue);
 
         // Check if state changed to READY. If so, will want to change self state to CONNECTED.
         let cluster_index = convert_token_to_cluster_index(backend_token.0);
-        let unhandled_responses = cluster_backends.get_mut(cluster_index).unwrap().0.handle_backend_response(clients, num_pools, num_backends);
+        let unhandled_responses = cluster_backends.get_mut(cluster_index).unwrap().0.handle_backend_response(clients, num_backends);
 
         let prev_state = self.status;
         self.change_state(BackendStatus::LOADING);
         if prev_state == BackendStatus::CONNECTING && self.status == BackendStatus::LOADING {
-            self.initialize_slotmap(backend_token, cluster_backends, num_pools);
+            self.initialize_slotmap(backend_token, cluster_backends, num_backends);
         }
 
         // TODO: Handle multiple responses. Assuming it's slotsmap.
@@ -362,8 +361,7 @@ impl ClusterBackend {
                         self.initialize_host(host.clone(), next_cluster_token_value, cluster_backends);
                         let backend_token = self.hostnames.get(&host).unwrap();
                         let cluster_index = convert_token_to_cluster_index(backend_token.0);
-                        cluster_backends.get_mut(cluster_index).unwrap().0.connect(num_backends);
-                        //self.register_backend_with_parent(backend_token.clone(), self.token.clone());
+                        cluster_backends.get_mut(cluster_index).unwrap().0.connect();
                     }
                 };
                 handle_slotsmap(response.clone(), &mut register_backend);
@@ -378,10 +376,9 @@ impl ClusterBackend {
         backend_token: BackendToken,
         clients: &mut HashMap<usize, (Client, usize)>,
         cluster_backends: &mut Vec<(SingleBackend, usize)>,
-        num_pools: usize,
         num_backends: usize) {
         let cluster_index = convert_token_to_cluster_index(backend_token.0);
-        cluster_backends.get_mut(cluster_index).unwrap().0.handle_backend_failure(clients, num_pools, num_backends);
+        cluster_backends.get_mut(cluster_index).unwrap().0.handle_backend_failure(clients, num_backends);
     }
 
     fn change_state(&mut self, target_state: BackendStatus) -> bool {
@@ -419,11 +416,9 @@ impl ClusterBackend {
         backend_token: BackendToken,
         clients: &mut HashMap<usize, (Client, usize)>,
         cluster_backends: &mut Vec<(SingleBackend, usize)>,
-        num_pools: usize,
-        num_backends: usize,
     ) -> bool {
         let cluster_index = convert_token_to_cluster_index(backend_token.0);
-        cluster_backends.get_mut(cluster_index).unwrap().0.handle_timeout(clients, num_pools, num_backends);
+        cluster_backends.get_mut(cluster_index).unwrap().0.handle_timeout(clients);
         if self.queue.len() == 0 {
             return false;
         }
