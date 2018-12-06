@@ -1,3 +1,4 @@
+use std::net::SocketAddr;
 use redflareproxy::PoolTokenValue;
 use redflareproxy::convert_token_to_cluster_index;
 use redflareproxy::Client;
@@ -272,7 +273,7 @@ impl ClusterBackend {
                 pool_token,
             );
             cluster_backends.push((single, token.0));
-            cluster.hostnames.insert(host.clone(), backend_token);
+            cluster.hostnames.insert(host.to_string(), backend_token);
             all_backend_tokens.push(backend_token.clone());
 
         }
@@ -280,12 +281,12 @@ impl ClusterBackend {
         (cluster, all_backend_tokens)
     }
 
-    fn initialize_host(&mut self, host: Host, next_cluster_token_value: &mut usize, cluster_backends: &mut Vec<(SingleBackend, usize)>) {
+    fn initialize_host(&mut self, host: SocketAddr, next_cluster_token_value: &mut usize, cluster_backends: &mut Vec<(SingleBackend, usize)>) {
         let backend_token = Token(*next_cluster_token_value);
         *next_cluster_token_value += 1;
             let (single, _) = SingleBackend::new(
                 self.config.clone(),
-                host.clone(),
+                host,
                 backend_token,
                 &self.poll_registry,
                 self.timeout,
@@ -294,7 +295,7 @@ impl ClusterBackend {
                 self.pool_token,
             );
         cluster_backends.push((single, self.token.0));
-        self.hostnames.insert(host.clone(), backend_token.clone());
+        self.hostnames.insert(host.to_string(), backend_token.clone());
     }
 
     pub fn reregister_token(&mut self, new_token: BackendToken) -> Result<(), std::io::Error> {
@@ -352,13 +353,20 @@ impl ClusterBackend {
             {
                 let mut register_backend = |host:String, start: usize, end: usize| {
                     debug!("Backend slots map registered! {} From {} to {}", host, start, end);
+                    let addr: SocketAddr = match host.parse() {
+                        Ok(a) => a,
+                        Err(err) => {
+                            error!("Unable to parse cluster backend: {:?}", host);
+                            panic!("Should be able to deal with this.");
+                        }
+                    };
                     for i in start..end+1 {
                         self.slots.remove(i);
                         self.slots.insert(i, host.clone());
                     }
 
                     if !self.hostnames.contains_key(&host) {
-                        self.initialize_host(host.clone(), next_cluster_token_value, cluster_backends);
+                        self.initialize_host(host.parse().unwrap(), next_cluster_token_value, cluster_backends);
                         let backend_token = self.hostnames.get(&host).unwrap();
                         let cluster_index = convert_token_to_cluster_index(backend_token.0);
                         cluster_backends.get_mut(cluster_index).unwrap().0.connect();

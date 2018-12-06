@@ -1,3 +1,4 @@
+use std::net::SocketAddr;
 use std::collections::BTreeMap;
 use toml;
 use std::fs::File;
@@ -57,7 +58,7 @@ pub struct BackendPoolConfig {
 }
 #[derive(Deserialize, Clone, Serialize, Eq, PartialEq, Hash)]
 pub struct BackendConfig {
-    pub host: String,
+    pub host: SocketAddr,
 
     // How to handle RedisCluster list of hosts?
 
@@ -73,7 +74,7 @@ pub struct BackendConfig {
     pub use_cluster: bool,
 
     #[serde(default)]
-    pub cluster_hosts: Vec<String>,
+    pub cluster_hosts: Vec<SocketAddr>,
 }
 
 #[derive(Deserialize, Clone, Serialize, Eq, PartialEq)]

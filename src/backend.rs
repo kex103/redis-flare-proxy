@@ -1,3 +1,4 @@
+use std::net::SocketAddr;
 use hashbrown::HashMap;
 use redflareproxy::ClientToken;
 use redflareproxy::BackendToken;
@@ -167,7 +168,7 @@ pub struct SingleBackend {
     token: BackendToken,
     status: BackendStatus,
     pub weight: usize,
-    host: String,
+    host: SocketAddr,
     pub queue: VecDeque<(ClientToken, Instant)>,
     failure_limit: usize,
     retry_timeout: usize,
@@ -186,7 +187,7 @@ pub struct SingleBackend {
 impl SingleBackend {
     pub fn new(
         config: BackendConfig,
-        host: String,
+        host: SocketAddr,
         token: Token,
         poll_registry: &Rc<RefCell<Poll>>,
         timeout: usize,
@@ -251,19 +252,15 @@ impl SingleBackend {
         return self.status == BackendStatus::READY;
     }
 
-    pub fn connect(
-        &mut self,
-    ) {
+    pub fn connect(&mut self) {
         if self.status == BackendStatus::READY || self.status == BackendStatus::CONNECTED {
             debug!("Trying to connect when already connected!");
             return;
         }
 
-        let addr = self.host.parse().unwrap();
-
         // Setup the server socket
-        let socket = TcpStream::connect(&addr).unwrap();
-        debug!("New socket to {}: {:?}", addr, socket);
+        let socket = TcpStream::connect(&self.host).unwrap();
+        debug!("New socket to {}: {:?}", self.host, socket);
 
         debug!("Registered backend: {:?}", &self.token);
         self.poll_registry.borrow_mut().register(&socket, self.token, Ready::readable() | Ready::writable(), PollOpt::edge()).unwrap();

@@ -5,7 +5,6 @@ use config::BackendConfig;
 use bufreader::BufReader;
 use mio::net::TcpStream;
 use backend::Backend;
-use backend::BackendEnum;
 use admin;
 use config::{RedFlareProxyConfig, BackendPoolConfig, load_config};
 use backendpool;
