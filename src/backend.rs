@@ -109,7 +109,7 @@ impl Backend {
         }
     }
 
-    pub fn connect(&mut self, cluster_backends: &mut Vec<(SingleBackend, usize)>) {
+    pub fn connect(&mut self, cluster_backends: &mut Vec<(SingleBackend, usize)>) -> Result<(), std::io::Error> {
         match self.single {
             BackendEnum::Single(ref mut backend) => backend.connect(),
             BackendEnum::Cluster(ref mut backend) => backend.connect(cluster_backends),
@@ -252,21 +252,22 @@ impl SingleBackend {
         return self.status == BackendStatus::READY;
     }
 
-    pub fn connect(&mut self) {
+    pub fn connect(&mut self) -> Result<(), std::io::Error> {
         if self.status == BackendStatus::READY || self.status == BackendStatus::CONNECTED {
             debug!("Trying to connect when already connected!");
-            return;
+            return Ok(());
         }
 
         // Setup the server socket
-        let socket = TcpStream::connect(&self.host).unwrap();
+        let socket = try!(TcpStream::connect(&self.host));
         debug!("New socket to {}: {:?}", self.host, socket);
 
+        try!(self.poll_registry.borrow_mut().register(&socket, self.token, Ready::readable() | Ready::writable(), PollOpt::edge()));
         debug!("Registered backend: {:?}", &self.token);
-        self.poll_registry.borrow_mut().register(&socket, self.token, Ready::readable() | Ready::writable(), PollOpt::edge()).unwrap();
         self.socket = Some(BufReader::new(socket));
 
         change_state(&mut self.status, BackendStatus::CONNECTING);
+        return Ok(());
     }
 
     // Callback after initializing a connection.
@@ -367,7 +368,8 @@ impl SingleBackend {
 
             if head.0 == NULL_TOKEN && (self.waiting_for_db_resp || self.waiting_for_auth_resp || self.waiting_for_ping_resp) {
                 change_state(&mut self.status, BackendStatus::DISCONNECTED);
-                self.connect();
+                // TODO: This should handle connection failure.
+                let _ = self.connect();
             }
 
             if head.0 != NULL_TOKEN {

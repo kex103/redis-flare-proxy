@@ -311,14 +311,16 @@ impl ClusterBackend {
         return self.status == BackendStatus::READY;
     }
 
-    pub fn connect(&mut self, cluster_backends: &mut Vec<(SingleBackend, usize)>) {
+    pub fn connect(&mut self, cluster_backends: &mut Vec<(SingleBackend, usize)>) -> Result<(), std::io::Error> {
         for backend_token in self.hostnames.values() {
-            debug!("KEX: connecting for a host! {:?}", backend_token);
             let client_index = convert_token_to_cluster_index(backend_token.0);
             let ref mut backend = cluster_backends.get_mut(client_index).unwrap().0;
-            backend.connect();
+            // TODO: Should backend connection fail on the first connection? Perhaps a config option should determine
+            // whether cluster needs to connect to all hosts, or just try one.
+            try!(backend.connect());
         }
         self.change_state(BackendStatus::CONNECTING);
+        return Ok(());
     }
 
     fn initialize_slotmap(&mut self, backend_token: BackendToken, cluster_backends: &mut Vec<(SingleBackend, usize)>, num_backends: usize) {
@@ -353,13 +355,7 @@ impl ClusterBackend {
             {
                 let mut register_backend = |host:String, start: usize, end: usize| {
                     debug!("Backend slots map registered! {} From {} to {}", host, start, end);
-                    let addr: SocketAddr = match host.parse() {
-                        Ok(a) => a,
-                        Err(err) => {
-                            error!("Unable to parse cluster backend: {:?}", host);
-                            panic!("Should be able to deal with this.");
-                        }
-                    };
+
                     for i in start..end+1 {
                         self.slots.remove(i);
                         self.slots.insert(i, host.clone());
@@ -369,7 +365,8 @@ impl ClusterBackend {
                         self.initialize_host(host.parse().unwrap(), next_cluster_token_value, cluster_backends);
                         let backend_token = self.hostnames.get(&host).unwrap();
                         let cluster_index = convert_token_to_cluster_index(backend_token.0);
-                        cluster_backends.get_mut(cluster_index).unwrap().0.connect();
+                        // TODO: Handle connection failure.
+                        let _ = cluster_backends.get_mut(cluster_index).unwrap().0.connect();
                     }
                 };
                 handle_slotsmap(response.clone(), &mut register_backend);

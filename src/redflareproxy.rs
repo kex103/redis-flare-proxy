@@ -377,7 +377,8 @@ impl RedFlareProxy {
                 let token_id = token.0 - FIRST_SOCKET_INDEX - num_pools - num_backends;
                 match self.backends.get_mut(token_id) {
                     Some(backend) => {
-                        backend.connect(&mut self.cluster_backends)
+                        // TODO: Handle connection failure. If it fails, try again?
+                        let _ = backend.connect(&mut self.cluster_backends);
                     }
                     None => error!("HashMap says it has token but it really doesn't! {:?}",token),
                 }
@@ -625,7 +626,7 @@ fn init_backend_pool(
     next_backend_token_value: &mut usize,
     pool_token_value: usize,
     poll: &Rc<RefCell<Poll>>,
-) {
+) -> Result<(), std::io::Error> {
     let pool_token = Token(pool_token_value);
     let mut pool = backendpool::BackendPool::new(pool_name.clone(), pool_token, pool_config.clone(), *next_backend_token_value);
 
@@ -637,13 +638,14 @@ fn init_backend_pool(
 
 
     for backend_config in pool_config.servers.clone() {
-        let backend = init_backend(backend_config, pool_config, cluster_backends, pool_token_value, backend_token_value, poll);
+        let backend = try!(init_backend(backend_config, pool_config, cluster_backends, pool_token_value, backend_token_value, poll));
         backends.push(backend);
         backend_token_value += 1;
         debug!("KEX: init_backend_pool Token_value now at {:?} backends len at {:?}", backend_token_value, backends.len());
     }
 
     backendpools.push(pool);
+    return Ok(());
 }
 
 pub fn init_backend(
@@ -653,7 +655,7 @@ pub fn init_backend(
     pool_token_value: usize,
     backend_token_value: usize,
     poll_registry: &Rc<RefCell<Poll>>,
-) -> Backend {
+) -> Result<Backend, std::io::Error> {
     // Initialize backends.
     let backend_token = Token(backend_token_value);
     let mut next_cluster_token_value = FIRST_CLUSTER_BACKEND_INDEX + cluster_backends.len();
@@ -668,6 +670,6 @@ pub fn init_backend(
         pool_config.retry_timeout,
         pool_token_value,
     );
-    backend.connect(cluster_backends);
-    return backend;
+    try!(backend.connect(cluster_backends));
+    return Ok(backend);
 }
