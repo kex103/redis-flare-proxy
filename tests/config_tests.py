@@ -5,6 +5,32 @@ from test_util import TestUtil
 
 class ConfigTests(TestUtil):
 
+    def test_bad_backend_configs(self):
+        # Verify that if backend does not have a host, it errors.
+        proxy_proc = self.start_proxy("tests/conf/configsinglenohost.toml")
+        self.assertEquals(proxy_proc.poll(), 1)
+
+        # Verify that if backend has cluster hosts, it errors.
+        proxy_proc = self.start_proxy("tests/conf/configsingleclusterhosts.toml")
+        self.assertEquals(proxy_proc.poll(), 1)
+
+        # Verify that if backend has a cluster name, it errors.
+        proxy_proc = self.start_proxy("tests/conf/configsingleclustername.toml")
+        self.assertEquals(proxy_proc.poll(), 1)
+
+        # Verify that if cluster does not have cluster hosts, it errors.
+        proxy_proc = self.start_proxy("tests/conf/configclusternohosts.toml")
+        self.assertEquals(proxy_proc.poll(), 1)
+
+        # Verify that if cluster does not have a cluster name, it errors.
+        proxy_proc = self.start_proxy("tests/conf/configclusternoname.toml")
+        self.assertEquals(proxy_proc.poll(), 1)
+
+        # Verify that if cluster has a host, it errors.
+        proxy_proc = self.start_proxy("tests/conf/configclusterwithhost.toml")
+        self.assertEquals(proxy_proc.poll(), 1)
+
+
     def test_switch_config(self):
         self.start_redis_server(6380)
         self.start_redis_server(6381)

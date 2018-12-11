@@ -28,7 +28,6 @@ pub enum BackendStatus {
     CONNECTING,
     LOADING,
 }
-pub type Host = String;
 
 pub enum BackendEnum {
     Single(SingleBackend),
@@ -55,7 +54,7 @@ impl Backend {
         let weight = config.weight;
         let (backend, all_backend_tokens) = match config.use_cluster {
             false => {
-                let host = config.host.clone();
+                let host = config.host.unwrap().clone();
                 let (backend, tokens) = SingleBackend::new(
                     config,
                     host,

@@ -115,7 +115,10 @@ fn main() {
     // Start proxy.
     debug!("Starting up");
 
-    let mut redflareproxy = redflareproxy::RedFlareProxy::new(config_path.to_owned()).unwrap();
+    let mut redflareproxy = match redflareproxy::RedFlareProxy::new(config_path.to_owned()) {
+        Ok(proxy) => proxy,
+        Err(_) => { std::process::exit(1); }
+    };
     redflareproxy.run();
     debug!("Finished.");
 }

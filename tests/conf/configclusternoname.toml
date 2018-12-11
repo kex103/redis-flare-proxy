@@ -3,9 +3,10 @@ listen = "127.0.0.1:1530"
 
 [pools]
   [pools.pool1]
-    listen = "127.0.0.1:1533"
+    listen = "127.0.0.1:1531"
+    timeout = 50
+    failure_limit = 1
     [[pools.pool1.servers]]
         use_cluster = true
-        cluster_name = "cluster1"
         cluster_hosts = ["127.0.0.1:7000","127.0.0.1:7001"]
         weight = 1

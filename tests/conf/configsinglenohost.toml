@@ -1,0 +1,11 @@
+[admin]
+listen = "127.0.0.1:1530"
+
+[pools]
+  [pools.pool1]
+    listen = "127.0.0.1:1531"
+    servers = [
+      { weight = 1, db = 1 }
+    ]
+    timeout = 50
+    failure_limit = 1

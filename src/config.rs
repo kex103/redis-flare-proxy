@@ -58,7 +58,8 @@ pub struct BackendPoolConfig {
 }
 #[derive(Deserialize, Clone, Serialize, Eq, PartialEq, Hash)]
 pub struct BackendConfig {
-    pub host: SocketAddr,
+    #[serde(default)]
+    pub host: Option<SocketAddr>,
 
     // How to handle RedisCluster list of hosts?
 
@@ -74,6 +75,9 @@ pub struct BackendConfig {
     pub use_cluster: bool,
 
     #[serde(default)]
+    pub cluster_name: Option<String>,
+
+    #[serde(default)]
     pub cluster_hosts: Vec<SocketAddr>,
 }
 
@@ -83,7 +87,6 @@ pub struct AdminConfig {
 }
 
 pub fn load_config(full_config_path: String) -> Result<RedFlareProxyConfig, ProxyError> {
-    // TODO: Change to result
     // TOOD: trim config_path
     let config_path = full_config_path.trim();
     let mut file = match File::open(&config_path) {
@@ -106,5 +109,34 @@ pub fn load_config(full_config_path: String) -> Result<RedFlareProxyConfig, Prox
             return Err(ProxyError::InvalidConfig(format!("Failed to convert file to toml {}: {:?}", config_path, err)));
         }
     };
+
+    // Verify that cluster-associated configs should only be used when use_cluster is true, and verify that host is there when use_cluster is false.
+    for (ref pool_name, ref pool_config) in &config.pools {
+        for ref backend_config in &pool_config.servers {
+            if !backend_config.use_cluster {
+                if backend_config.host.is_none() {
+                    return Err(ProxyError::InvalidConfig(format!("Non-cluster backend requires a 'host' in pool {}. {}", pool_name, config_path)));
+                }
+                if backend_config.cluster_hosts.len() > 0 {
+                    return Err(ProxyError::InvalidConfig(format!("Non-cluster backend cannot have any 'cluster_hosts' in pool {}. {}", pool_name, config_path)));
+                }
+                if backend_config.cluster_name.is_some() {
+                    return Err(ProxyError::InvalidConfig(format!("Non-cluster backend cannot have a 'cluster_name' in pool {}. {}", pool_name, config_path)));
+                }
+            } else {
+                if backend_config.host.is_some() {
+                    return Err(ProxyError::InvalidConfig(format!("Cluster backend cannot have a 'host' in pool {}. {}", pool_name, config_path)));
+                }
+                if backend_config.cluster_hosts.len() == 0 {
+                    return Err(ProxyError::InvalidConfig(format!("Cluster backend requires 'cluster_hosts' in pool {}. {}", pool_name, config_path)));
+                }
+                if backend_config.cluster_name.is_none() {
+                    return Err(ProxyError::InvalidConfig(format!("Cluster backend requires a 'cluster_name' in pool {}. {}", pool_name, config_path)));
+                }
+
+            }
+        }
+    }
+
     Ok(config)
 }

@@ -3,7 +3,7 @@ use redflareproxy::PoolTokenValue;
 use redflareproxy::convert_token_to_cluster_index;
 use redflareproxy::Client;
 use redflareproxy::{BackendToken, ClientToken, NULL_TOKEN};
-use backend::{BackendStatus, Host, SingleBackend};
+use backend::{BackendStatus, SingleBackend};
 use config::BackendConfig;
 use std::collections::{VecDeque};
 use hashbrown::HashMap;
@@ -17,6 +17,8 @@ use std::rc::Rc;
 use std::ops::Index;
 use std;
 use redisprotocol::extract_key;
+
+pub type Host = String;
 
 #[cfg(test)]
 use log4rs;
