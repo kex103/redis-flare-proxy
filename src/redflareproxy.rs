@@ -50,6 +50,9 @@ pub type PoolIndex = usize;
 pub type PoolTokenValue = usize;
 pub type BackendIndex = usize;
 pub type BackendTokenValue = usize;
+pub type TimeoutTokenValue = usize;
+pub type RequestTimeoutTokenValue = usize;
+pub type ClusterTokenValue = usize;
 
 #[derive(Clone, Copy, Debug)]
 enum SubType {
@@ -331,9 +334,7 @@ impl RedFlareProxy {
             let subscriber = self.identify_token(token);
             match subscriber {
                 SubType::PoolServer => {
-                    let token_id = token.0 - FIRST_SOCKET_INDEX - self.backendpools.len();
-                    let num_pools = self.backendpools.len();
-                    let num_backends = self.backends.len();
+                    let token_id = convert_token_to_backend_index(token.0, self.backendpools.len());
                     let backend = match self.backends.get_mut(token_id) {
                         Some(backend) => backend,
                         None => {
@@ -375,7 +376,8 @@ impl RedFlareProxy {
                 debug!("RetryTimeout {:?}", token);
                 let num_pools = self.backendpools.len();
                 let num_backends = self.backends.len();
-                let token_id = token.0 - FIRST_SOCKET_INDEX - num_pools - num_backends;
+                let token_id = convert_token_to_timeout_index(token.0, num_pools, num_backends);
+
                 match self.backends.get_mut(token_id) {
                     Some(backend) => {
                         backend.init_connection(&mut self.cluster_backends);
@@ -387,8 +389,8 @@ impl RedFlareProxy {
                 debug!("RequestTimeout {:?})", token);
                 let num_pools = self.backendpools.len();
                 let num_backends = self.backends.len();
-                let backend_token = Token(token.0 - num_backends);
-                let token_id = token.0 - FIRST_SOCKET_INDEX - num_pools - 2*num_backends;
+                let token_id = convert_token_to_requesttimeout_index(token.0, num_pools, num_backends);
+                let backend_token = Token(token.0 - 2 * num_backends);
                 match self.backends.get_mut(token_id) {
                     Some(backend) => {
                         handle_timeout(backend, backend_token, &mut self.clients, &mut self.cluster_backends);
@@ -398,7 +400,7 @@ impl RedFlareProxy {
             }
             SubType::PoolListener => {
                 debug!("PoolListener {:?}", token);
-                let token_id = token.0 - FIRST_SOCKET_INDEX;
+                let token_id = convert_token_to_pool_index(token.0);
                 match self.backendpools.get_mut(token_id) {
                     Some(pool) => pool.accept_client_connection(&self.poll, &mut self.next_client_token_value, &mut self.clients),
                     None => error!("HashMap says it has token but it really doesn't!"),
@@ -408,7 +410,7 @@ impl RedFlareProxy {
                 debug!("PoolServer {:?}", token);
                 let num_pools = self.backendpools.len();
                 let num_backends = self.backends.len();
-                let backend_index = convert_token_to_backend_index(num_pools, token.0);
+                let backend_index = convert_token_to_backend_index(token.0, num_pools);
                 let mut next_cluster_token_value = FIRST_CLUSTER_BACKEND_INDEX + self.cluster_backends.len();
                 match self.backends.get_mut(backend_index) {
                     Some(b) => b.handle_backend_response(token, &mut self.clients, &mut next_cluster_token_value, &mut self.cluster_backends, num_backends),
@@ -421,7 +423,7 @@ impl RedFlareProxy {
                 let num_backends = self.backends.len();
                 let cluster_index = convert_token_to_cluster_index(token.0);
                 let pool_token_value = self.cluster_backends.get(cluster_index).unwrap().1;
-                let backend_index = convert_token_to_backend_index(num_pools, pool_token_value);
+                let backend_index = convert_token_to_backend_index(pool_token_value, num_pools);
                 let mut next_cluster_token_value = FIRST_CLUSTER_BACKEND_INDEX + self.cluster_backends.len();
                 self.backends.get_mut(backend_index).unwrap().handle_backend_response(token, &mut self.clients, &mut next_cluster_token_value, &mut self.cluster_backends, num_backends);
             }
@@ -573,16 +575,20 @@ impl RedFlareProxy {
     }
 }
 
-pub fn convert_token_to_backend_index(num_pools: usize, token_value: usize) -> usize {
+pub fn convert_token_to_pool_index(token_value: PoolTokenValue) -> usize {
+    return token_value - FIRST_SOCKET_INDEX;
+}
+
+pub fn convert_token_to_backend_index(token_value: BackendTokenValue, num_pools: usize) -> usize {
     return token_value - FIRST_SOCKET_INDEX - num_pools;
 }
-pub fn convert_token_to_timeout_index(num_pools: usize, num_backends: usize, token_value: usize) -> usize {
+pub fn convert_token_to_timeout_index(token_value: TimeoutTokenValue, num_pools: usize, num_backends: usize) -> usize {
     return token_value - FIRST_SOCKET_INDEX - num_pools - num_backends;
 }
-pub fn convert_token_to_requesttimeout_index(num_pools: usize, num_backends: usize, token_value: usize) -> usize {
+pub fn convert_token_to_requesttimeout_index(token_value: RequestTimeoutTokenValue, num_pools: usize, num_backends: usize) -> usize {
     return token_value - FIRST_SOCKET_INDEX - num_pools - 2*num_backends;
 }
-pub fn convert_token_to_cluster_index(token_value: usize) -> usize {
+pub fn convert_token_to_cluster_index(token_value: ClusterTokenValue) -> usize {
     return token_value - FIRST_CLUSTER_BACKEND_INDEX;
 }
 

@@ -1,3 +1,4 @@
+use redflareproxy::PoolTokenValue;
 use std::net::SocketAddr;
 use hashbrown::HashMap;
 use redflareproxy::ClientToken;
@@ -41,14 +42,14 @@ pub struct Backend {
 impl Backend {
     pub fn new(
         config: BackendConfig,
-        token: Token,
+        token: BackendToken,
         cluster_backends: &mut Vec<(SingleBackend, usize)>,
         poll_registry: &Rc<RefCell<Poll>>,
         next_cluster_token_value: &mut usize,
         timeout: usize,
         failure_limit: usize,
         retry_timeout: usize,
-        pool_token: usize,
+        pool_token: PoolTokenValue,
         num_backends: usize,
     ) -> (Backend, Vec<Token>) {
         let weight = config.weight;
@@ -97,7 +98,7 @@ impl Backend {
         }
     }
 
-    pub fn change_pool_token(&mut self, new_token_value: usize) {
+    pub fn change_pool_token(&mut self, new_token_value: PoolTokenValue) {
         match self.single {
             BackendEnum::Single(ref mut backend) => backend.change_pool_token(new_token_value),
             BackendEnum::Cluster(ref mut backend) => backend.change_pool_token(new_token_value),
@@ -128,7 +129,7 @@ impl Backend {
     pub fn write_message(
         &mut self,
         message: &[u8],
-        client_token: Token,
+        client_token: ClientToken,
         cluster_backends: &mut Vec<(SingleBackend, usize)>,
         num_backends: usize,
     ) -> bool {
@@ -190,7 +191,7 @@ impl SingleBackend {
     pub fn new(
         config: BackendConfig,
         host: SocketAddr,
-        token: Token,
+        token: BackendToken,
         poll_registry: &Rc<RefCell<Poll>>,
         timeout: usize,
         failure_limit: usize,
@@ -248,7 +249,7 @@ impl SingleBackend {
         return Ok(());
     }
 
-    pub fn change_pool_token(&mut self, new_token_value: usize) {
+    pub fn change_pool_token(&mut self, new_token_value: PoolTokenValue) {
         self.pool_token = new_token_value;
     }
 
@@ -519,7 +520,7 @@ impl SingleBackend {
 
     fn write_to_stream(
         &mut self,
-        client_token: Token,
+        client_token: ClientToken,
         message: &[u8],
         num_backends: usize,
     ) {
