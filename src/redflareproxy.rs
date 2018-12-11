@@ -135,7 +135,7 @@ impl RedFlareProxy {
                 &mut next_backend_token_value,
                 pool_token_value,
                 &mut redflareproxy.poll,
-
+                num_backends,
             );
             pool_token_value += 1;
         }
@@ -276,6 +276,7 @@ impl RedFlareProxy {
                                 &mut next_backend_token_value,
                                 pool_token_value,
                                 &mut self.poll,
+                                num_backends,
                             );
                         }
                     }
@@ -340,7 +341,7 @@ impl RedFlareProxy {
                             return;
                         }
                     };
-                    backend.handle_backend_failure(token, &mut self.clients, &mut self.cluster_backends, num_backends);
+                    backend.handle_backend_failure(token, &mut self.clients, &mut self.cluster_backends);
                     return;
                 }
                 SubType::PoolClient => {
@@ -377,8 +378,7 @@ impl RedFlareProxy {
                 let token_id = token.0 - FIRST_SOCKET_INDEX - num_pools - num_backends;
                 match self.backends.get_mut(token_id) {
                     Some(backend) => {
-                        // TODO: Handle connection failure. If it fails, try again?
-                        let _ = backend.connect(&mut self.cluster_backends);
+                        backend.init_connection(&mut self.cluster_backends);
                     }
                     None => error!("HashMap says it has token but it really doesn't! {:?}",token),
                 }
@@ -391,7 +391,7 @@ impl RedFlareProxy {
                 let token_id = token.0 - FIRST_SOCKET_INDEX - num_pools - 2*num_backends;
                 match self.backends.get_mut(token_id) {
                     Some(backend) => {
-                        handle_timeout(backend, backend_token, &mut self.clients, &mut self.cluster_backends, num_backends);
+                        handle_timeout(backend, backend_token, &mut self.clients, &mut self.cluster_backends);
                     }
                     None => error!("HashMap says it has token but it really doesn't! {:?}", token),
                 }
@@ -617,6 +617,10 @@ fn handle_client(
     return false;
 }
 
+
+/*
+Initializes a backend pool, establishes a connection.
+*/
 fn init_backend_pool(
     backendpools: &mut Vec<BackendPool>,
     backends: &mut Vec<Backend>,
@@ -626,7 +630,8 @@ fn init_backend_pool(
     next_backend_token_value: &mut usize,
     pool_token_value: usize,
     poll: &Rc<RefCell<Poll>>,
-) -> Result<(), std::io::Error> {
+    num_backends: usize,
+) {
     let pool_token = Token(pool_token_value);
     let mut pool = backendpool::BackendPool::new(pool_name.clone(), pool_token, pool_config.clone(), *next_backend_token_value);
 
@@ -636,26 +641,25 @@ fn init_backend_pool(
     
     pool.connect(&mut poll.borrow_mut());
 
-
     for backend_config in pool_config.servers.clone() {
-        let backend = try!(init_backend(backend_config, pool_config, cluster_backends, pool_token_value, backend_token_value, poll));
+        let backend = init_backend(backend_config, pool_config, cluster_backends, pool_token_value, backend_token_value, poll, num_backends);
         backends.push(backend);
         backend_token_value += 1;
         debug!("KEX: init_backend_pool Token_value now at {:?} backends len at {:?}", backend_token_value, backends.len());
     }
 
     backendpools.push(pool);
-    return Ok(());
 }
 
-pub fn init_backend(
+fn init_backend(
     backend_config: BackendConfig,
     pool_config: &BackendPoolConfig,
     cluster_backends: &mut Vec<(SingleBackend, usize)>,
     pool_token_value: usize,
     backend_token_value: usize,
     poll_registry: &Rc<RefCell<Poll>>,
-) -> Result<Backend, std::io::Error> {
+    num_backends: usize,
+) -> Backend {
     // Initialize backends.
     let backend_token = Token(backend_token_value);
     let mut next_cluster_token_value = FIRST_CLUSTER_BACKEND_INDEX + cluster_backends.len();
@@ -669,7 +673,8 @@ pub fn init_backend(
         pool_config.failure_limit,
         pool_config.retry_timeout,
         pool_token_value,
+        num_backends,
     );
-    try!(backend.connect(cluster_backends));
-    return Ok(backend);
+    backend.init_connection(cluster_backends);
+    return backend;
 }

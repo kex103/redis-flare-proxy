@@ -226,7 +226,7 @@ pub struct ClusterBackend {
     failure_limit: usize,
     retry_timeout: usize,
     poll_registry: Rc<RefCell<Poll>>,
-
+    num_backends: usize,
 }
 impl ClusterBackend {
     pub fn new(
@@ -239,6 +239,7 @@ impl ClusterBackend {
         failure_limit: usize,
         retry_timeout: usize,
         pool_token: usize,
+        num_backends: usize,
     ) -> (ClusterBackend, Vec<BackendToken>) {
         let mut cluster = ClusterBackend {
             hostnames: HashMap::new(),
@@ -252,6 +253,7 @@ impl ClusterBackend {
             failure_limit: failure_limit,
             retry_timeout: retry_timeout,
             poll_registry: Rc::clone(poll_registry),
+            num_backends: num_backends,
         };
         for _ in 0..cluster.slots.capacity() {
             cluster.slots.push("".to_owned());
@@ -271,6 +273,7 @@ impl ClusterBackend {
                 failure_limit,
                 retry_timeout,
                 pool_token,
+                num_backends,
             );
             cluster_backends.push((single, token.0));
             cluster.hostnames.insert(host.to_string(), backend_token);
@@ -293,6 +296,7 @@ impl ClusterBackend {
                 self.failure_limit,
                 self.retry_timeout,
                 self.pool_token,
+                self.num_backends,
             );
         cluster_backends.push((single, self.token.0));
         self.hostnames.insert(host.to_string(), backend_token.clone());
@@ -366,7 +370,7 @@ impl ClusterBackend {
                         let backend_token = self.hostnames.get(&host).unwrap();
                         let cluster_index = convert_token_to_cluster_index(backend_token.0);
                         // TODO: Handle connection failure.
-                        let _ = cluster_backends.get_mut(cluster_index).unwrap().0.connect();
+                        cluster_backends.get_mut(cluster_index).unwrap().0.init_connection();
                     }
                 };
                 handle_slotsmap(response.clone(), &mut register_backend);
@@ -380,10 +384,10 @@ impl ClusterBackend {
         &mut self,
         backend_token: BackendToken,
         clients: &mut HashMap<usize, (Client, usize)>,
-        cluster_backends: &mut Vec<(SingleBackend, usize)>,
-        num_backends: usize) {
+        cluster_backends: &mut Vec<(SingleBackend, usize)>
+    ) {
         let cluster_index = convert_token_to_cluster_index(backend_token.0);
-        cluster_backends.get_mut(cluster_index).unwrap().0.handle_backend_failure(clients, num_backends);
+        cluster_backends.get_mut(cluster_index).unwrap().0.handle_backend_failure(clients);
     }
 
     fn change_state(&mut self, target_state: BackendStatus) -> bool {

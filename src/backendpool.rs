@@ -66,10 +66,7 @@ impl BackendPool {
         }
     }
 
-    pub fn connect(
-        &mut self,
-        poll_registry: &mut Poll,
-    ) {
+    pub fn connect(&mut self, poll_registry: &mut Poll) {
         // Setup the server socket
         let addr = match self.config.listen.parse() {
             Ok(addr) => addr,
@@ -238,10 +235,9 @@ pub fn handle_timeout(
     backend_token: BackendToken,
     clients: &mut HashMap<usize, (Client, usize)>,
     cluster_backends: &mut Vec<(SingleBackend, usize)>,
-    num_backends: usize,
 ) {
     if backend.handle_timeout(backend_token, clients, cluster_backends) {
-        mark_backend_down(backend, backend_token, clients, cluster_backends, num_backends);
+        mark_backend_down(backend, backend_token, clients, cluster_backends);
     }
 }
 
@@ -250,9 +246,8 @@ fn mark_backend_down(
     token: BackendToken,
     clients: &mut HashMap<usize, (Client, usize)>,
     cluster_backends: &mut Vec<(SingleBackend, usize)>,
-    num_backends: usize,
 ) {
-    backend.handle_backend_failure(token, clients, cluster_backends, num_backends);
+    backend.handle_backend_failure(token, clients, cluster_backends);
     //if self.config.auto_eject_hosts {
         //self.rebuild_pool_sharding();
     //}

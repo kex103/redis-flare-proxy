@@ -50,6 +50,7 @@ impl Backend {
         failure_limit: usize,
         retry_timeout: usize,
         pool_token: usize,
+        num_backends: usize,
     ) -> (Backend, Vec<Token>) {
         let weight = config.weight;
         let (backend, all_backend_tokens) = match config.use_cluster {
@@ -64,6 +65,7 @@ impl Backend {
                     failure_limit,
                     retry_timeout,
                     pool_token,
+                    num_backends,
                 );
                 (BackendEnum::Single(backend), tokens)
             }
@@ -78,6 +80,7 @@ impl Backend {
                     failure_limit,
                     retry_timeout,
                     pool_token,
+                    num_backends,
                 );
                 (BackendEnum::Cluster(backend), tokens)
             }
@@ -106,6 +109,13 @@ impl Backend {
         match self.single {
             BackendEnum::Single(ref mut backend) => backend.is_available(),
             BackendEnum::Cluster(ref mut backend) => backend.is_available(),
+        }
+    }
+
+    pub fn init_connection(&mut self, cluster_backends: &mut Vec<(SingleBackend, usize)>) {
+        match self.single {
+            BackendEnum::Single(ref mut backend) => backend.init_connection(),
+            BackendEnum::Cluster(ref mut backend) => panic!("Unimplemented"),
         }
     }
 
@@ -155,11 +165,10 @@ impl Backend {
         token: Token,
         clients: &mut HashMap<usize, (Client, usize)>,
         cluster_backends: &mut Vec<(SingleBackend, usize)>,
-        num_backends: usize,
     ) {
         match self.single {
-            BackendEnum::Single(ref mut backend) => backend.handle_backend_failure(clients, num_backends),
-            BackendEnum::Cluster(ref mut backend) => backend.handle_backend_failure(token, clients, cluster_backends, num_backends),
+            BackendEnum::Single(ref mut backend) => backend.handle_backend_failure(clients),
+            BackendEnum::Cluster(ref mut backend) => backend.handle_backend_failure(token, clients, cluster_backends),
         }
     }
 }
@@ -183,6 +192,7 @@ pub struct SingleBackend {
     waiting_for_auth_resp: bool,
     waiting_for_db_resp: bool,
     waiting_for_ping_resp: bool,
+    num_backends: usize,
 }
 impl SingleBackend {
     pub fn new(
@@ -194,6 +204,7 @@ impl SingleBackend {
         failure_limit: usize,
         retry_timeout: usize,
         pool_token: usize,
+        num_backends: usize,
     ) -> (SingleBackend, Vec<Token>) {
         debug!("Initialized Backend: token: {:?}", token);
         // TODO: Configure message queue size per backend.
@@ -216,6 +227,7 @@ impl SingleBackend {
             waiting_for_auth_resp: false,
             waiting_for_db_resp: false,
             waiting_for_ping_resp: false,
+            num_backends: num_backends,
         };
         (backend, Vec::new())
     }
@@ -250,6 +262,17 @@ impl SingleBackend {
 
     pub fn is_available(&mut self) -> bool {
         return self.status == BackendStatus::READY;
+    }
+
+    pub fn init_connection(&mut self) {
+        match self.connect() {
+            Ok(a) => a,
+            Err(err) => {
+                debug!("Failed to establish connection due to {:?}", err);
+                change_state(&mut self.status, BackendStatus::DISCONNECTED);
+                self.set_retry_timer();
+            }
+        }
     }
 
     pub fn connect(&mut self) -> Result<(), std::io::Error> {
@@ -368,8 +391,7 @@ impl SingleBackend {
 
             if head.0 == NULL_TOKEN && (self.waiting_for_db_resp || self.waiting_for_auth_resp || self.waiting_for_ping_resp) {
                 change_state(&mut self.status, BackendStatus::DISCONNECTED);
-                // TODO: This should handle connection failure.
-                let _ = self.connect();
+                self.init_connection();
             }
 
             if head.0 != NULL_TOKEN {
@@ -472,17 +494,17 @@ impl SingleBackend {
         return unhandled_internal_responses;
     }
 
-    pub fn handle_backend_failure(&mut self, clients: &mut HashMap<usize, (Client, usize)>, num_backends: usize) {
+    pub fn handle_backend_failure(&mut self, clients: &mut HashMap<usize, (Client, usize)>) {
         self.mark_backend_down(clients);
-        self.retry_connect(num_backends);
+        self.set_retry_timer();
     }
 
-    fn retry_connect(&mut self, num_backends: usize) {
+    fn set_retry_timer(&mut self) {
         debug!("Creating timer");
         // Create new timer.
         if self.retry_timer.is_none() {
             let timer = create_timer();
-            let timer_token = Token(self.token.0 + num_backends);
+            let timer_token = Token(self.token.0 + self.num_backends);
             self.poll_registry.borrow_mut().register(&timer, timer_token, Ready::readable(), PollOpt::edge()).unwrap();
             self.retry_timer = Some(timer);
         }
