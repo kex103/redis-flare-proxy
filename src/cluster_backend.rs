@@ -317,16 +317,15 @@ impl ClusterBackend {
         return self.status == BackendStatus::READY;
     }
 
-    pub fn connect(&mut self, cluster_backends: &mut Vec<(SingleBackend, usize)>) -> Result<(), std::io::Error> {
+    pub fn init_connection(&mut self, cluster_backends: &mut Vec<(SingleBackend, usize)>) {
         for backend_token in self.hostnames.values() {
             let client_index = convert_token_to_cluster_index(backend_token.0);
             let ref mut backend = cluster_backends.get_mut(client_index).unwrap().0;
             // TODO: Should backend connection fail on the first connection? Perhaps a config option should determine
             // whether cluster needs to connect to all hosts, or just try one.
-            try!(backend.connect());
+            backend.init_connection();
         }
         self.change_state(BackendStatus::CONNECTING);
-        return Ok(());
     }
 
     fn initialize_slotmap(&mut self, backend_token: BackendToken, cluster_backends: &mut Vec<(SingleBackend, usize)>, num_backends: usize) {

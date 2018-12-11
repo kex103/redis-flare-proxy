@@ -114,14 +114,7 @@ impl Backend {
     pub fn init_connection(&mut self, cluster_backends: &mut Vec<(SingleBackend, usize)>) {
         match self.single {
             BackendEnum::Single(ref mut backend) => backend.init_connection(),
-            BackendEnum::Cluster(ref mut backend) => panic!("Unimplemented"),
-        }
-    }
-
-    pub fn connect(&mut self, cluster_backends: &mut Vec<(SingleBackend, usize)>) -> Result<(), std::io::Error> {
-        match self.single {
-            BackendEnum::Single(ref mut backend) => backend.connect(),
-            BackendEnum::Cluster(ref mut backend) => backend.connect(cluster_backends),
+            BackendEnum::Cluster(ref mut backend) => backend.init_connection(cluster_backends),
         }
     }
 
