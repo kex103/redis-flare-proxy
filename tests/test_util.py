@@ -7,6 +7,7 @@ import sys
 import time
 import unittest
 import socket
+import re
 
 class TestUtil(unittest.TestCase):
     subprocesses = []
@@ -209,7 +210,10 @@ class TestUtil(unittest.TestCase):
         time.sleep(0.5); # TODO: wait until proxy initializes.
         self.subprocesses.append(process)
         # TODO: Get the port name to remove.
-        self.proxy_admin_ports.append(1530)
+        with open(config_path) as f:
+            matches = re.search('\\[admin\\]\\nlisten = ".*:(.*)"', f.read())
+            listen_port = int(matches.group(1))
+            self.proxy_admin_ports.append(listen_port)
         return process
 
     def start_delayer(self, incoming_port, outgoing_port, delay, admin_port=6400):
