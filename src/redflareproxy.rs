@@ -1,8 +1,11 @@
+use std::fmt;
+use std::error;
+use std::net::SocketAddr;
 use backend::SingleBackend;
 use backendpool::handle_timeout;
 use backendpool::handle_client_readable;
 use config::BackendConfig;
-use bufreader::BufReader;
+use std::io::BufReader;
 use mio::net::TcpStream;
 use backend::Backend;
 use admin;
@@ -68,21 +71,76 @@ enum SubType {
 
 #[derive(Debug)]
 pub enum ProxyError {
-    InvalidConfig(String),
-    PollFailure(String),
+    InvalidLogLevel(String),
+    InvalidParams(log4rs::config::Errors),
+    LogFileFailure(String, std::io::Error),
+    SetLoggerError(log::SetLoggerError),
+
+    ConfigFileFailure(String, std::io::Error),
+    ConfigFileFormatFailure(String, std::io::Error), // probably because not UTF8
+    ParseConfigFailure(String, toml::de::Error),
+
+    InitPollFailure(std::io::Error),
+    PoolBindSocketFailure(SocketAddr, std::io::Error),
+    PoolPollFailure(std::io::Error),
+
+    UnavailableConfig,
+    SameConfig,
+
+    PollFailure(std::io::Error),
+}
+
+impl fmt::Display for ProxyError {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        match self {
+            ProxyError::InvalidLogLevel(ref l) => write!(f, "Unrecognized log level: {}. Please use {{DEBUG|INFO|WARNING|ERROR}}.", l),
+            ProxyError::InvalidParams(ref e) => write!(f, "Invalid arguments: {}", e),
+            ProxyError::LogFileFailure(ref file, ref e) => write!(f, "Unable to log to file: {}. Received error: {}", file, e),
+            ProxyError::SetLoggerError(ref e) => write!(f, "Failed to initialize logger. Received error: {}.", e),
+            ProxyError::ConfigFileFailure(ref c, ref e) => write!(f, "Unable to open config file: {}. Received error: {}", c, e),
+            ProxyError::ConfigFileFormatFailure(ref c, ref e) => write!(f, "Unable to parse config file: {}. Perhaps it's not UTF8 encoded. Received error: {}", c, e),
+            ProxyError::ParseConfigFailure(ref c, ref e) => write!(f, "Unable to parse config file: {} into appropriate types. Received error: {}", c, e),
+            ProxyError::InitPollFailure(ref e) => write!(f, "Unable to initialize event poll. Received error: {}", e),
+            ProxyError::PoolBindSocketFailure(ref addr, ref e) => write!(f, "Unable to bind to pool listening socket: {}. Received error: {}", addr, e),
+            ProxyError::PoolPollFailure(ref e) => write!(f, "Unable to register backend pool to event poll. Received error: {}", e),
+            ProxyError::UnavailableConfig => write!(f, "No staged config. Please load a config first."),
+            ProxyError::SameConfig => write!(f, "The loaded and staged configs are identical."),
+            ProxyError::PollFailure(ref e) => write!(f, "Unable to poll the event poll. Received error: {}", e),
+        }
+    }
+}
+
+impl error::Error for ProxyError {
+    fn source(&self) -> Option<&(dyn error::Error + 'static)> {
+        match self {
+            ProxyError::InvalidLogLevel(_) => None,
+            ProxyError::InvalidParams(ref e) => Some(e),
+            ProxyError::LogFileFailure(_, ref e) => Some(e),
+            ProxyError::SetLoggerError(ref e) => Some(e),
+            ProxyError::ConfigFileFailure(_, ref e) => Some(e),
+            ProxyError::ConfigFileFormatFailure(_, ref e) => Some(e),
+            ProxyError::ParseConfigFailure(_, ref e) => Some(e),
+            ProxyError::InitPollFailure(ref e) => Some(e),
+            ProxyError::PoolBindSocketFailure(_, ref e) => Some(e),
+            ProxyError::PoolPollFailure(ref e) => Some(e),
+            ProxyError::UnavailableConfig => None,
+            ProxyError::SameConfig => None,
+            ProxyError::PollFailure(ref e) => Some(e),
+        }
+    }
 }
 
 // High-level struct that contains everything for a redflareproxy instance.
 pub struct RedFlareProxy {
     // This may just get integrated back into RedFlareProxy.
-    pub admin: admin::AdminPort,
+    admin: admin::AdminPort,
 
     // Configs
-    pub config: RedFlareProxyConfig,
-    pub staged_config: Option<RedFlareProxyConfig>,
+    config: RedFlareProxyConfig,
+    staged_config: Option<RedFlareProxyConfig>,
 
     // Child structs.
-    pub backendpools: Vec<BackendPool>,
+    backendpools: Vec<BackendPool>,
     backends: Vec<Backend>,
     cluster_backends: Vec<(SingleBackend, BackendTokenValue)>,
 
@@ -99,8 +157,8 @@ impl RedFlareProxy {
         let config = try!(load_config(config_path));
         let poll = match Poll::new() {
             Ok(poll) => Rc::new(RefCell::new(poll)),
-            Err(error) => {
-                return Err(ProxyError::PollFailure(format!("Failed to init poll: {:?}", error)));
+            Err(err) => {
+                return Err(ProxyError::InitPollFailure(err));
             }
         };
         let admin = admin::AdminPort::new(config.admin.clone(), &poll.borrow());
@@ -129,7 +187,7 @@ impl RedFlareProxy {
         let mut next_backend_token_value = FIRST_SOCKET_INDEX + num_pools;
         let mut pool_token_value = FIRST_SOCKET_INDEX;
         for (pool_name, pool_config) in pools_config {
-            init_backend_pool(
+            try!(init_backend_pool(
                 &mut redflareproxy.backendpools,
                 &mut redflareproxy.backends,
                 &pool_name,
@@ -139,7 +197,7 @@ impl RedFlareProxy {
                 pool_token_value,
                 &mut redflareproxy.poll,
                 num_backends,
-            );
+            ));
             pool_token_value += 1;
         }
         debug!("Initialized redflareproxy");
@@ -149,14 +207,14 @@ impl RedFlareProxy {
 
     pub fn switch_config(&mut self) -> Result<(), ProxyError> {
         if self.staged_config.is_none() {
-            return Err(ProxyError::InvalidConfig("No staged config".to_owned()));
+            return Err(ProxyError::UnavailableConfig);
         }
         // Check that configs aren't the same.
         {
             match self.staged_config {
                 Some(ref staged_config) => {
                     if staged_config == &self.config {
-                        return Err(ProxyError::InvalidConfig("The configs are the same!".to_owned()));
+                        return Err(ProxyError::SameConfig);
                     }
                 }
                 None => {}
@@ -171,7 +229,7 @@ impl RedFlareProxy {
             self.admin = admin; // TODO: what to do with old admin?
         }
 
-        let mut existing_clients: HashMap<String, Vec<Client>> = HashMap::new();
+        let mut existing_clients: HashMap<SocketAddr, Vec<Client>> = HashMap::new();
         for (_client_token_value, (client, pool_token_value)) in self.clients.drain() {
             // check listen socket of pool_token_value.
             let pool_index = pool_token_value - FIRST_SOCKET_INDEX;
@@ -229,8 +287,8 @@ impl RedFlareProxy {
                     num_backends += pool_config.servers.len();
                 }
                 let mut new_backends = Vec::with_capacity(num_backends);
-                let mut new_clients: HashMap<usize, (Client, usize)> = HashMap::new();
-                let mut new_cluster_backends: Vec<(SingleBackend, usize)> = Vec::new();
+                let mut new_clients: HashMap<ClientTokenValue, (Client, PoolTokenValue)> = HashMap::new();
+                let mut new_cluster_backends: Vec<(SingleBackend, BackendTokenValue)> = Vec::new();
                 // TODO: Implement cluster switching.
 
                 let pools_config = self.config.pools.clone();
@@ -257,7 +315,8 @@ impl RedFlareProxy {
                             let first_backend_index = pool.first_backend_index;
                             for i in (first_backend_index..first_backend_index+num_backends).rev() {
                                 let mut backend = remaining_backends.remove(&i).unwrap();
-                                let _ = backend.reregister_token(Token(i), num_backends);
+                                // TODO: Also change number of backends.
+                                let _ = backend.reregister_token(Token(i), &mut new_cluster_backends, num_backends);
 
                                 // also, rename pool token.
                                 backend.change_pool_token(pool_token_value);
@@ -270,7 +329,7 @@ impl RedFlareProxy {
                             new_backendpools.push(pool);
                         }
                         None => {
-                            init_backend_pool(
+                            try!(init_backend_pool(
                                 &mut new_backendpools,
                                 &mut new_backends,
                                 &pool_name,
@@ -280,7 +339,7 @@ impl RedFlareProxy {
                                 pool_token_value,
                                 &mut self.poll,
                                 num_backends,
-                            );
+                            ));
                         }
                     }
                     match existing_clients.remove(&pool_config.listen) {
@@ -308,19 +367,20 @@ impl RedFlareProxy {
         Ok(())
     }
 
-    pub fn run(&mut self) {
+    pub fn run(&mut self) -> Result<(), ProxyError> {
         let mut events = Events::with_capacity(1024);
         while self.running {
             match self.poll.borrow_mut().poll(&mut events, None) {
                 Ok(_poll_size) => {}
                 Err(error) => {
-                    panic!("Error polling. Shutting down: {:?}", error);
+                    return Err(ProxyError::PollFailure(error));
                 }
             };
             for event in events.iter() {
                 self.handle_event(&event);
             }
         }
+        return Ok(());
     }
 
     fn handle_event(&mut self, event: &Event) {
@@ -409,23 +469,21 @@ impl RedFlareProxy {
             SubType::PoolServer => {
                 debug!("PoolServer {:?}", token);
                 let num_pools = self.backendpools.len();
-                let num_backends = self.backends.len();
                 let backend_index = convert_token_to_backend_index(token.0, num_pools);
                 let mut next_cluster_token_value = FIRST_CLUSTER_BACKEND_INDEX + self.cluster_backends.len();
                 match self.backends.get_mut(backend_index) {
-                    Some(b) => b.handle_backend_response(token, &mut self.clients, &mut next_cluster_token_value, &mut self.cluster_backends, num_backends),
+                    Some(b) => b.handle_backend_response(token, &mut self.clients, &mut next_cluster_token_value, &mut self.cluster_backends),
                     None => error!("HashMap says it has token but it really doesn't!"),
                 }
             }
             SubType::ClusterServer => {
                 debug!("ClusterServer {:?}", token);
                 let num_pools = self.backendpools.len();
-                let num_backends = self.backends.len();
                 let cluster_index = convert_token_to_cluster_index(token.0);
                 let pool_token_value = self.cluster_backends.get(cluster_index).unwrap().1;
                 let backend_index = convert_token_to_backend_index(pool_token_value, num_pools);
                 let mut next_cluster_token_value = FIRST_CLUSTER_BACKEND_INDEX + self.cluster_backends.len();
-                self.backends.get_mut(backend_index).unwrap().handle_backend_response(token, &mut self.clients, &mut next_cluster_token_value, &mut self.cluster_backends, num_backends);
+                self.backends.get_mut(backend_index).unwrap().handle_backend_response(token, &mut self.clients, &mut next_cluster_token_value, &mut self.cluster_backends);
             }
             SubType::AdminClient => {
                 debug!("AdminClient {:?}", token);
@@ -529,16 +587,11 @@ impl RedFlareProxy {
                     self.admin.write_to_client(token, response);
 
                 }
-                Err(ProxyError::InvalidConfig(message)) => {
+                Err(err) => {
                     let mut response = String::new();
                     response.push_str("-");
-                    response.push_str(&message);
+                    response.push_str(&format!("{}", err));
                     response.push_str("\r\n");
-                    self.admin.write_to_client(token, response);
-                }
-                Err(_) => {
-                    let mut response = String::new();
-                    response.push_str("-Unknown admin error\r\n");
                     self.admin.write_to_client(token, response);
                 }
             }
@@ -571,15 +624,13 @@ impl RedFlareProxy {
             return SubType::ClusterServer;
         }
         return SubType::PoolClient;
-        // TODO panic!("Need to identify between AdminClient");
     }
 }
 
-pub fn convert_token_to_pool_index(token_value: PoolTokenValue) -> usize {
+pub fn convert_token_to_pool_index(token_value: PoolTokenValue) -> PoolIndex {
     return token_value - FIRST_SOCKET_INDEX;
 }
-
-pub fn convert_token_to_backend_index(token_value: BackendTokenValue, num_pools: usize) -> usize {
+pub fn convert_token_to_backend_index(token_value: BackendTokenValue, num_pools: usize) -> BackendIndex {
     return token_value - FIRST_SOCKET_INDEX - num_pools;
 }
 pub fn convert_token_to_timeout_index(token_value: TimeoutTokenValue, num_pools: usize, num_backends: usize) -> usize {
@@ -592,6 +643,9 @@ pub fn convert_token_to_cluster_index(token_value: ClusterTokenValue) -> usize {
     return token_value - FIRST_CLUSTER_BACKEND_INDEX;
 }
 
+/*
+    @return bool Whether to keep the client or not.
+*/
 fn handle_client(
     backendpools: &mut Vec<BackendPool>,
     backends: &mut Vec<Backend>,
@@ -600,7 +654,6 @@ fn handle_client(
     token: &mut Token,
 ) -> bool {
     let num_pools = backendpools.len();
-    let num_backends = backends.len();
     match clients.get_mut(&token.0) {
         Some((client, pool_token_value)) => {
             let pool_index = *pool_token_value - FIRST_SOCKET_INDEX;
@@ -614,7 +667,7 @@ fn handle_client(
                 Some(b) => b,
                 None => panic!("Unable to get full backends from {:?} to {:?}", start_backend_index, last_index),
             };
-            let res = handle_client_readable(client, &pool_config, *token, backends, cluster_backends, num_backends);
+            let res = handle_client_readable(client, &pool_config, *token, backends, cluster_backends);
             return res.unwrap();
         }
         None => { error!("An event occurred for an expired client: {:?}", token); }
@@ -637,7 +690,7 @@ fn init_backend_pool(
     pool_token_value: usize,
     poll: &Rc<RefCell<Poll>>,
     num_backends: usize,
-) {
+) -> Result<(), ProxyError> {
     let pool_token = Token(pool_token_value);
     let mut pool = backendpool::BackendPool::new(pool_name.clone(), pool_token, pool_config.clone(), *next_backend_token_value);
 
@@ -645,7 +698,7 @@ fn init_backend_pool(
 
     *next_backend_token_value += pool_config.servers.len();
     
-    pool.connect(&mut poll.borrow_mut());
+    try!(pool.connect(&mut poll.borrow_mut()));
 
     for backend_config in pool_config.servers.clone() {
         let backend = init_backend(backend_config, pool_config, cluster_backends, pool_token_value, backend_token_value, poll, num_backends);
@@ -655,6 +708,7 @@ fn init_backend_pool(
     }
 
     backendpools.push(pool);
+    return Ok(());
 }
 
 fn init_backend(

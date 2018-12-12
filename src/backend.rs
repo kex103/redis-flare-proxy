@@ -4,7 +4,7 @@ use hashbrown::HashMap;
 use redflareproxy::ClientToken;
 use redflareproxy::BackendToken;
 use redflareproxy::Client;
-use bufreader::BufReader;
+use std::io::BufReader;
 use redflareproxy::{NULL_TOKEN};
 use config::BackendConfig;
 use mio::*;
@@ -18,7 +18,7 @@ use std::time::Instant;
 use std::cell::RefCell;
 use std::rc::Rc;
 use cluster_backend::{ClusterBackend};
-use redisprotocol::extract_redis_command2;
+use redisprotocol::extract_redis_command;
 use redisprotocol::RedisError;
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -91,10 +91,10 @@ impl Backend {
         }, all_backend_tokens)
     }
 
-    pub fn reregister_token(&mut self, new_token: BackendToken, num_backends: usize) -> Result<(), std::io::Error> {
+    pub fn reregister_token(&mut self, new_token: BackendToken, cluster_backends: &mut Vec<(SingleBackend, usize)>, new_num_backends: usize) -> Result<(), std::io::Error> {
         match self.single {
-            BackendEnum::Single(ref mut backend) => backend.reregister_token(new_token, num_backends),
-            BackendEnum::Cluster(ref mut backend) => backend.reregister_token(new_token),
+            BackendEnum::Single(ref mut backend) => backend.reregister_token(new_token, new_num_backends),
+            BackendEnum::Cluster(ref mut backend) => backend.reregister_token(new_token, cluster_backends, new_num_backends),
         }
     }
 
@@ -131,11 +131,10 @@ impl Backend {
         message: &[u8],
         client_token: ClientToken,
         cluster_backends: &mut Vec<(SingleBackend, usize)>,
-        num_backends: usize,
     ) -> bool {
         match self.single {
-            BackendEnum::Single(ref mut backend) => backend.write_message(message, client_token, num_backends),
-            BackendEnum::Cluster(ref mut backend) => backend.write_message(message, client_token, cluster_backends, num_backends),
+            BackendEnum::Single(ref mut backend) => backend.write_message(message, client_token),
+            BackendEnum::Cluster(ref mut backend) => backend.write_message(message, client_token, cluster_backends),
         }
     }
 
@@ -145,11 +144,10 @@ impl Backend {
         clients: &mut HashMap<usize, (Client, usize)>,
         next_cluster_token_value: &mut usize,
         cluster_backends: &mut Vec<(SingleBackend, usize)>,
-        num_backends: usize
     ) {
         match self.single {
-            BackendEnum::Single(ref mut backend) => { backend.handle_backend_response(clients, num_backends); }
-            BackendEnum::Cluster(ref mut backend) => backend.handle_backend_response(token, clients, next_cluster_token_value, cluster_backends, num_backends),
+            BackendEnum::Single(ref mut backend) => { backend.handle_backend_response(clients); }
+            BackendEnum::Cluster(ref mut backend) => backend.handle_backend_response(token, clients, next_cluster_token_value, cluster_backends),
         };
     }
 
@@ -185,7 +183,7 @@ pub struct SingleBackend {
     waiting_for_auth_resp: bool,
     waiting_for_db_resp: bool,
     waiting_for_ping_resp: bool,
-    num_backends: usize,
+    pub num_backends: usize,
 }
 impl SingleBackend {
     pub fn new(
@@ -225,23 +223,24 @@ impl SingleBackend {
         (backend, Vec::new())
     }
 
-    pub fn reregister_token(&mut self, new_token: BackendToken, num_backends: usize) -> Result<(), std::io::Error> {
+    pub fn reregister_token(&mut self, new_token: BackendToken, new_num_backends: usize) -> Result<(), std::io::Error> {
+        self.num_backends = new_num_backends;
         match self.socket {
             Some(ref s) => {
                 self.token = new_token;
-                let _ = self.poll_registry.borrow_mut().reregister(s.get_ref(), new_token, Ready::readable() | Ready::writable(), PollOpt::edge());
+                self.poll_registry.borrow_mut().reregister(s.get_ref(), new_token, Ready::readable() | Ready::writable(), PollOpt::edge());
             }
             None => {}
         }
         match self.retry_timer {
             Some(ref t) => {
-                let _ = self.poll_registry.borrow_mut().reregister(t, Token(new_token.0 + num_backends), Ready::readable(), PollOpt::edge());
+                self.poll_registry.borrow_mut().reregister(t, Token(new_token.0 + self.num_backends), Ready::readable(), PollOpt::edge());
             }
             None => {}
         }
         match self.timer {
             Some(ref t) => {
-                let _ = self.poll_registry.borrow_mut().reregister(t, Token(new_token.0 + 2* num_backends), Ready::readable(), PollOpt::edge());
+                self.poll_registry.borrow_mut().reregister(t, Token(new_token.0 + 2* self.num_backends), Ready::readable(), PollOpt::edge());
             }
             None => {}
         }
@@ -287,7 +286,7 @@ impl SingleBackend {
     }
 
     // Callback after initializing a connection.
-    fn handle_connection(&mut self, num_backends: usize) {
+    fn handle_connection(&mut self) {
         //self.timer = None;
 
         // TODO: Use a macro to encode the requests into redis protocol.
@@ -302,7 +301,7 @@ impl SingleBackend {
             request.push_str("\r\n");
             request.push_str(&self.config.auth);
             request.push_str("\r\n");
-            self.write_to_stream(NULL_TOKEN, &request.as_bytes(), num_backends);
+            self.write_to_stream(NULL_TOKEN, &request.as_bytes());
             self.waiting_for_auth_resp = true;
             wait_for_resp = true;
         }
@@ -314,13 +313,13 @@ impl SingleBackend {
             request.push_str("\r\n");
             request.push_str(&self.config.db.to_string());
             request.push_str("\r\n");
-            self.write_to_stream(NULL_TOKEN, &request.as_bytes(), num_backends);
+            self.write_to_stream(NULL_TOKEN, &request.as_bytes());
             self.waiting_for_db_resp = true;
             wait_for_resp = true;
         }
 
         if self.timeout != 0 {
-            self.write_to_stream(NULL_TOKEN, "PING\r\n".as_bytes(), num_backends);
+            self.write_to_stream(NULL_TOKEN, "PING\r\n".as_bytes());
             self.waiting_for_ping_resp = true;
             wait_for_resp = true;
         }
@@ -445,11 +444,10 @@ impl SingleBackend {
         &mut self,
         message: &[u8],
         client_token: Token,
-        num_backends: usize,
     ) -> bool {
         match self.status {
             BackendStatus::READY => {
-                self.write_to_stream(client_token, message, num_backends);
+                self.write_to_stream(client_token, message);
                 true
             }
             _ => {
@@ -459,11 +457,11 @@ impl SingleBackend {
         }
     }
 
-    pub fn handle_backend_response(&mut self, clients: &mut HashMap<usize, (Client, usize)>, num_backends: usize) -> VecDeque<String> {
+    pub fn handle_backend_response(&mut self, clients: &mut HashMap<usize, (Client, usize)>) -> VecDeque<String> {
         let prev_state = self.status;
         change_state(&mut self.status, BackendStatus::CONNECTED);
         if prev_state == BackendStatus::CONNECTING && self.status == BackendStatus::CONNECTED {
-            self.handle_connection(num_backends);
+            self.handle_connection();
         }
 
         let mut unhandled_internal_responses = VecDeque::new();
@@ -506,7 +504,7 @@ impl SingleBackend {
         let timestamp = now + Duration::from_millis(self.retry_timeout as u64);
         match self.retry_timer {
             Some(ref mut timer) => {
-                let _ = timer.set_timeout(Duration::new(0, (1000000 * self.retry_timeout) as u32), timestamp);
+                timer.set_timeout(Duration::new(0, (1000000 * self.retry_timeout) as u32), timestamp);
             }
             None => { panic!("impossible"); }
         }
@@ -522,12 +520,11 @@ impl SingleBackend {
         &mut self,
         client_token: ClientToken,
         message: &[u8],
-        num_backends: usize,
     ) {
         debug!("Write to backend {:?} {}: {:?} {:?}", &self.token, self.host, std::str::from_utf8(&message), client_token);
         match self.socket {
             Some(ref mut socket) => {
-                let _ = socket.get_mut().write(&message);
+                socket.get_mut().write(&message);
             }
             None => panic!("No connection to backend"),
         }
@@ -537,7 +534,7 @@ impl SingleBackend {
         if self.queue.len() == 1 && self.timeout != 0 {
             if self.timer.is_none() {
                 let timer = create_timer();
-                let timer_token = Token(self.token.0 + 2*num_backends);
+                let timer_token = Token(self.token.0 + 2 * self.num_backends);
                 debug!("Registered timer: {:?}", timer_token);
                 self.poll_registry.borrow_mut().register(&timer, timer_token, Ready::readable(), PollOpt::edge()).unwrap();
                 self.timer = Some(timer);
@@ -629,7 +626,7 @@ fn route_backend_response(
                 };
 
                 debug!("Read from backend: {:?}", std::str::from_utf8(buf));
-                let response = try!(extract_redis_command2(buf));
+                let response = try!(extract_redis_command(buf));
                 if response.len() == 0 {
                     return Ok(false);
                 }

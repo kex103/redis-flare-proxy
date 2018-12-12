@@ -9,6 +9,7 @@ extern crate env_logger;
 extern crate serde_derive;
 extern crate serde;
 extern crate clap;
+use redflareproxy::ProxyError;
 use clap::{Arg, App};
 extern crate daemonize;
 extern crate conhash;
@@ -35,12 +36,11 @@ mod cluster_backend;
 mod backendpool;
 mod redisprotocol;
 mod hash;
-mod bufreader;
 
 /*
 Entrypoint for redflareproxy.
 */
-fn main() {
+fn main() -> Result<(), ProxyError> {
     // Take in args.
     let matches = App::new("RedFlareProxy")
                     .version("0.1")
@@ -68,57 +68,62 @@ fn main() {
                     .get_matches();
 
     // initialize logging
-    let log_file = matches.value_of("log_file"); // TODO: Handle missing log_file.
     let log_level = match matches.value_of("log_level").unwrap().to_uppercase().as_str().trim() {
         "DEBUG" => LogLevelFilter::Debug,
         "INFO" => LogLevelFilter::Info,
         "WARNING" => LogLevelFilter::Warn,
         "ERROR" => LogLevelFilter::Error,
         level => {
-            println!("Unrecognized log level: {}. Please use {{DEBUG|INFO|WARNING|ERROR}}.", level);
-            return;
+            return Err(ProxyError::InvalidLogLevel(level.to_string()));
         }
     };
-    let config_path = matches.value_of("config").unwrap();
 
     let stdout = ConsoleAppender::builder().build();
 
+    let log_file = matches.value_of("log_file");
     let config = match log_file {
         Some(file_path) => {
-            let requests = FileAppender::builder()
-                .encoder(Box::new(PatternEncoder::new("{d} - {m}{n}")))
-                .build(file_path)
-                .unwrap();
+            let requests: log4rs::append::file::FileAppender = match FileAppender::builder()
+                .encoder(Box::new(PatternEncoder::new("{d} - {m}{n}"))).build(file_path) {
+                Ok(a) => a,
+                Err(err) => {
+                    return Err(ProxyError::LogFileFailure(file_path.to_string(), err));
+                }
+            };
 
-            Config::builder()
+            try!(Config::builder()
                 .appender(Appender::builder().build("stdout", Box::new(stdout)))
                 .appender(Appender::builder().build("logfile", Box::new(requests)))
-                .build(Root::builder().appender("stdout").appender("logfile").build(log_level))
-                .unwrap()
+                .build(Root::builder().appender("stdout").appender("logfile").build(log_level)))
         }
         None => {
-            Config::builder()
+            try!(Config::builder()
                 .appender(Appender::builder().build("stdout", Box::new(stdout)))
-                .build(Root::builder().appender("stdout").build(log_level))
-                .unwrap()
+                .build(Root::builder().appender("stdout").build(log_level)))
         }
     };
 
-    match log4rs::init_config(config) {
-        Ok(_) => {},
-        Err(logger_error) => {
-            println!("Logging error: {:?}", logger_error);
-            return;
-        }
-    };
+    try!(log4rs::init_config(config));
 
+    let config_path = matches.value_of("config").unwrap();
+    
     // Start proxy.
     debug!("Starting up");
 
-    let mut redflareproxy = match redflareproxy::RedFlareProxy::new(config_path.to_owned()) {
-        Ok(proxy) => proxy,
-        Err(_) => { std::process::exit(1); }
-    };
-    redflareproxy.run();
+    let mut redflareproxy = try!(redflareproxy::RedFlareProxy::new(config_path.to_owned()));
+    try!(redflareproxy.run());
     debug!("Finished.");
+    return Ok(());
+}
+
+impl std::convert::From<log::SetLoggerError> for redflareproxy::ProxyError {
+    fn from(error: log::SetLoggerError) -> Self {
+        return ProxyError::SetLoggerError(error);
+    }
+}
+
+impl std::convert::From<log4rs::config::Errors> for redflareproxy::ProxyError {
+    fn from(error: log4rs::config::Errors) -> Self {
+        return ProxyError::InvalidParams(error);
+    }
 }

@@ -47,7 +47,7 @@ class ConfigTests(TestUtil):
             r.execute_command("SWITCHCONFIG")
             self.fail("Expected failure from SWITCHCONFIG")
         except redis.ResponseError, e:
-            self.assertEqual(str(e), "The configs are the same!")
+            self.assertEqual(str(e), "The loaded and staged configs are identical.")
 
         # Same admin port, different listen_port.
         response = r.execute_command("LOADCONFIG tests/conf/swapconfig2.toml")

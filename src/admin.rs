@@ -3,7 +3,7 @@ use redflareproxy::{ClientToken};
 use config::{AdminConfig};
 
 use mio::*;
-use bufreader::BufReader;
+use std::io::BufReader;
 use mio::tcp::{TcpListener, TcpStream};
 use hashbrown::HashMap;
 use std::io::Write;
@@ -79,7 +79,7 @@ impl AdminPort {
     pub fn write_to_client(&mut self, client_token: ClientToken, message: String) {
         match self.client_sockets.get_mut(&client_token) {
             Some(client_stream) => {
-                let _ = client_stream.get_mut().write(&message.into_bytes()[..]);
+                client_stream.get_mut().write(&message.into_bytes()[..]);
             }
             None => {
                 debug!("No client found for admin: {:?}. Did a switch_config just occur?", client_token);

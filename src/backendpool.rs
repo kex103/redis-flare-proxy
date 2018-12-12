@@ -4,7 +4,7 @@ use backend::SingleBackend;
 use redflareproxy::ClientToken;
 use redflareproxy::Client;
 use redflareproxy::ProxyError;
-use redisprotocol::extract_redis_command2;
+use redisprotocol::extract_redis_command;
 use hash::hash;
 use redflareproxy::BackendToken;
 use redflareproxy::PoolToken;
@@ -26,8 +26,7 @@ use rand::Rng;
 use std::cell::RefCell;
 use std::rc::Rc;
 
-use bufreader::BufReader;
-
+use std::io::BufReader;
 
 #[derive(Clone)]
 struct IndexNode {
@@ -53,11 +52,10 @@ pub struct BackendPool {
 }
 
 impl BackendPool {
-    pub fn new(name: String, pool_token: PoolToken, config: BackendPoolConfig, first_backend_index: usize) -> BackendPool {
-        debug!("Pool token: {:?}", pool_token);
-        debug!("Pool name: {:?}", name);
+    pub fn new(pool_name: String, pool_token: PoolToken, config: BackendPoolConfig, first_backend_index: usize) -> BackendPool {
+        debug!("PoolToken: {:?} for pool: {:?}", pool_token, pool_name);
         BackendPool {
-            name: name,
+            name: pool_name,
             token: pool_token,
             num_backends: config.servers.len(),
             config: config,
@@ -66,24 +64,29 @@ impl BackendPool {
         }
     }
 
-    pub fn connect(&mut self, poll_registry: &mut Poll) {
+    /*
+        Attempts to establish the pool by binding to the listening socket, and registering to the event poll.
+        If this process fails, an error is returned.
+    */
+    pub fn connect(&mut self, poll_registry: &mut Poll) -> Result<(), ProxyError> {
         // Setup the server socket
-        let addr = match self.config.listen.parse() {
-            Ok(addr) => addr,
-            Err(err) => {
-                panic!("Failed to parse backendpool address {:?}: {:?}", self.config.listen, err);
-            }
-        };
+        let addr = self.config.listen;
         let server_socket = match TcpListener::bind(&addr) {
             Ok(soc) => soc,
             Err(err) => {
-                panic!("Unable to bind to {:?}: {:?}", addr, err);
+                return Err(ProxyError::PoolBindSocketFailure(addr, err));
             }
         };
 
         debug!("Setup backend listener: {:?}", self.token);
-        poll_registry.register(&server_socket, self.token, Ready::readable(), PollOpt::edge()).unwrap();
+        match poll_registry.register(&server_socket, self.token, Ready::readable(), PollOpt::edge()) {
+            Ok(_) => {}
+            Err(err) => {
+                return Err(ProxyError::PoolPollFailure(err));
+            }
+        };
         self.listen_socket = Some(server_socket);
+        return Ok(());
     }
 
     pub fn accept_client_connection(
@@ -259,7 +262,6 @@ pub fn handle_client_readable(
     client_token: ClientToken,
     backends: &mut [Backend],
     cluster_backends: &mut Vec<(SingleBackend, usize)>,
-    num_backends: usize,
 ) -> Result<bool, RedisError> {
     debug!("Handling client: {:?}", &client_token);
 
@@ -276,7 +278,7 @@ pub fn handle_client_readable(
             }
             else {
                 debug!("Read from client:\n{:?}", std::str::from_utf8(buf));
-                let client_request = try!(extract_redis_command2(buf));
+                let client_request = try!(extract_redis_command(buf));
                 debug!("Extracted from client:\n{:?}", std::str::from_utf8(&client_request));
 
 
@@ -287,7 +289,7 @@ pub fn handle_client_readable(
                 let mut err_resp: Option<&[u8]> = None;
                 match shard(pool_config, backends, &client_request) {
                     Ok(backend) => {
-                        if !backend.write_message(&client_request, client_token, cluster_backends, num_backends) {
+                        if !backend.write_message(&client_request, client_token, cluster_backends) {
                             err_resp = Some(b"-ERROR: Not connected\r\n");
                         }
                     }
@@ -313,7 +315,7 @@ pub fn handle_client_readable(
         match err_resp {
             Some(resp) => {
                 debug!("Wrote to client error: {:?}: {:?}", client_token, std::str::from_utf8(resp));
-                let _ = client_stream.get_mut().write(resp);
+                client_stream.get_mut().write(resp);
             }
             None => {
             }

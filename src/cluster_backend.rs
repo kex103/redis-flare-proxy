@@ -304,8 +304,17 @@ impl ClusterBackend {
         self.hostnames.insert(host.to_string(), backend_token.clone());
     }
 
-    pub fn reregister_token(&mut self, new_token: BackendToken) -> Result<(), std::io::Error> {
+    pub fn reregister_token(&mut self, new_token: BackendToken, cluster_backends: &mut Vec<(SingleBackend, usize)>, new_num_backends: usize) -> Result<(), std::io::Error> {
         self.token = new_token;
+        self.num_backends = new_num_backends;
+
+        for backend_token in self.hostnames.values() {
+            let client_index = convert_token_to_cluster_index(backend_token.0);
+            let ref mut backend = cluster_backends.get_mut(client_index).unwrap().0;
+            // TODO: Should backend connection fail on the first connection? Perhaps a config option should determine
+            // whether cluster needs to connect to all hosts, or just try one.
+            backend.num_backends = new_num_backends;
+        }
         return Ok(());
     }
 
@@ -328,10 +337,10 @@ impl ClusterBackend {
         self.change_state(BackendStatus::CONNECTING);
     }
 
-    fn initialize_slotmap(&mut self, backend_token: BackendToken, cluster_backends: &mut Vec<(SingleBackend, usize)>, num_backends: usize) {
+    fn initialize_slotmap(&mut self, backend_token: BackendToken, cluster_backends: &mut Vec<(SingleBackend, usize)>) {
         let cluster_index = convert_token_to_cluster_index(backend_token.0);
         let ref mut host = cluster_backends.get_mut(cluster_index).unwrap().0;
-        host.write_message(b"*2\r\n$7\r\nCLUSTER\r\n$5\r\nSLOTS\r\n", NULL_TOKEN, num_backends);
+        host.write_message(b"*2\r\n$7\r\nCLUSTER\r\n$5\r\nSLOTS\r\n", NULL_TOKEN);
         self.queue.push_back(host.queue.back().unwrap().clone());
     }
 
@@ -341,18 +350,17 @@ impl ClusterBackend {
         clients: &mut HashMap<usize, (Client, usize)>,
         next_cluster_token_value: &mut usize,
         cluster_backends: &mut Vec<(SingleBackend, usize)>,
-        num_backends: usize
     ) {
         debug!("Queue: {:?}", self.queue);
 
         // Check if state changed to READY. If so, will want to change self state to CONNECTED.
         let cluster_index = convert_token_to_cluster_index(backend_token.0);
-        let unhandled_responses = cluster_backends.get_mut(cluster_index).unwrap().0.handle_backend_response(clients, num_backends);
+        let unhandled_responses = cluster_backends.get_mut(cluster_index).unwrap().0.handle_backend_response(clients);
 
         let prev_state = self.status;
         self.change_state(BackendStatus::LOADING);
         if prev_state == BackendStatus::CONNECTING && self.status == BackendStatus::LOADING {
-            self.initialize_slotmap(backend_token, cluster_backends, num_backends);
+            self.initialize_slotmap(backend_token, cluster_backends);
         }
 
         // TODO: Handle multiple responses. Assuming it's slotsmap.
@@ -470,13 +478,12 @@ impl ClusterBackend {
         message: &[u8],
         client_token: ClientToken,
         cluster_backends: &mut Vec<(SingleBackend, usize)>,
-        num_backends: usize,
     ) -> bool {
         // get the predicted backend to write to.
         let backend_token = self.get_shard(message);
         debug!("Cluster Writing to {:?}. Source: {:?}", backend_token, client_token);
         let cluster_index = convert_token_to_cluster_index(backend_token.0);
-        let result = cluster_backends.get_mut(cluster_index).unwrap().0.write_message(message, client_token, num_backends);
+        let result = cluster_backends.get_mut(cluster_index).unwrap().0.write_message(message, client_token);
         if result {
             self.queue.push_back(cluster_backends.get(cluster_index).unwrap().0.queue.back().unwrap().clone());
             return true;

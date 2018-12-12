@@ -31,7 +31,7 @@ fn default_hash_function() -> HashFunction {
 
 #[derive(Deserialize, Clone, Serialize, Eq, PartialEq, Hash)]
 pub struct BackendPoolConfig {
-    pub listen: String,
+    pub listen: SocketAddr,
 
     pub servers: Vec<BackendConfig>,
 
@@ -92,21 +92,21 @@ pub fn load_config(full_config_path: String) -> Result<RedFlareProxyConfig, Prox
     let mut file = match File::open(&config_path) {
         Ok(file) => file,
         Err(err) => {
-            return Err(ProxyError::InvalidConfig(format!("Really, I Failed to open file {}: {:?}", config_path, err)));
+            return Err(ProxyError::ConfigFileFailure(config_path.to_string(), err));
         }
     };
     let mut file_contents = String::new();
     match file.read_to_string(&mut file_contents) {
         Ok(_) => (),
         Err(err) => {
-            return Err(ProxyError::InvalidConfig(format!("Failed to read file {}: {:?}", config_path, err)));
+            return Err(ProxyError::ConfigFileFormatFailure(config_path.to_string(), err));
         }
     };
     debug!("Config contents: {}", file_contents);
     let config: RedFlareProxyConfig = match toml::from_str(&file_contents) {
         Ok(config) => config,
         Err(err) => {
-            return Err(ProxyError::InvalidConfig(format!("Failed to convert file to toml {}: {:?}", config_path, err)));
+            return Err(ProxyError::ParseConfigFailure(config_path.to_string(), err));
         }
     };
 
@@ -115,23 +115,23 @@ pub fn load_config(full_config_path: String) -> Result<RedFlareProxyConfig, Prox
         for ref backend_config in &pool_config.servers {
             if !backend_config.use_cluster {
                 if backend_config.host.is_none() {
-                    return Err(ProxyError::InvalidConfig(format!("Non-cluster backend requires a 'host' in pool {}. {}", pool_name, config_path)));
+                    return Err(ProxyError::ParseConfigFailure(config_path.to_string(), serde::de::Error::custom(format!("Non-cluster backend requires a 'host' in pool {}. {}", pool_name, config_path))));
                 }
                 if backend_config.cluster_hosts.len() > 0 {
-                    return Err(ProxyError::InvalidConfig(format!("Non-cluster backend cannot have any 'cluster_hosts' in pool {}. {}", pool_name, config_path)));
+                    return Err(ProxyError::ParseConfigFailure(config_path.to_string(), serde::de::Error::custom(format!("Non-cluster backend cannot have any 'cluster_hosts' in pool {}. {}", pool_name, config_path))));
                 }
                 if backend_config.cluster_name.is_some() {
-                    return Err(ProxyError::InvalidConfig(format!("Non-cluster backend cannot have a 'cluster_name' in pool {}. {}", pool_name, config_path)));
+                    return Err(ProxyError::ParseConfigFailure(config_path.to_string(), serde::de::Error::custom(format!("Non-cluster backend cannot have a 'cluster_name' in pool {}. {}", pool_name, config_path))));
                 }
             } else {
                 if backend_config.host.is_some() {
-                    return Err(ProxyError::InvalidConfig(format!("Cluster backend cannot have a 'host' in pool {}. {}", pool_name, config_path)));
+                    return Err(ProxyError::ParseConfigFailure(config_path.to_string(), serde::de::Error::custom(format!("Cluster backend cannot have a 'host' in pool {}. {}", pool_name, config_path))));
                 }
                 if backend_config.cluster_hosts.len() == 0 {
-                    return Err(ProxyError::InvalidConfig(format!("Cluster backend requires 'cluster_hosts' in pool {}. {}", pool_name, config_path)));
+                    return Err(ProxyError::ParseConfigFailure(config_path.to_string(), serde::de::Error::custom(format!("Cluster backend requires 'cluster_hosts' in pool {}. {}", pool_name, config_path))));
                 }
                 if backend_config.cluster_name.is_none() {
-                    return Err(ProxyError::InvalidConfig(format!("Cluster backend requires a 'cluster_name' in pool {}. {}", pool_name, config_path)));
+                    return Err(ProxyError::ParseConfigFailure(config_path.to_string(), serde::de::Error::custom(format!("Cluster backend requires a 'cluster_name' in pool {}. {}", pool_name, config_path))));
                 }
 
             }
