@@ -1,7 +1,5 @@
 use memchr::memchr;
-use std::slice::Iter;
 use std::result::Result;
-use std;
 
 #[cfg(test)]
 use std::time::Instant;
@@ -18,7 +16,6 @@ pub enum RedisError {
 }
 
 enum KeyPosition {
-    None,
     Next,
     Unsupported,
     Eval,
@@ -33,120 +30,24 @@ fn test_parsing_redis() {
     let a = "*5\r\n$4\r\nEVAL\r\n$40\r\nreturn redis.call('set',KEYS[1],ARGV[1])\r\n$1\r\n1\r\n$5\r\nkey10\r\n$7\r\nvalue10".to_string();
     let resp = extract_key(&a.as_bytes());
     assert_eq!(resp, Ok("key10".as_bytes()));
-
-
-    let a = "*2\r\n$3\r\nGET\r\n$4\r\nkey1\r\n".to_string();
-    let resp = extract_key2(&a.as_bytes());
-    assert_eq!(resp, Ok("key1".as_bytes()));
-    let a = "*5\r\n$4\r\nEVAL\r\n$40\r\nreturn redis.call('set',KEYS[1],ARGV[1])\r\n$1\r\n1\r\n$5\r\nkey10\r\n$7\r\nvalue10".to_string();
-    let resp = extract_key2(&a.as_bytes());
-    assert_eq!(resp, Ok("key10".as_bytes()));
 }
 
 #[test]
-fn test_speed() {
-    let num_runs = 100000;
+fn test_parsing_speed() {
+    let num_runs = 10000000;
     init_logging_info();
-    let a = format!("*2\r\n$3\r\nGET\r\n$4\r\nkey1\r\n{:?}", time::now());
+    let a = "*2\r\n$3\r\nGET\r\n$4\r\nkey1\r\n".to_string();
     let b = a.as_bytes();
+
+    // Using this test function to test how fast hashing can be.
     let start = Instant::now();
     for _ in 1..num_runs {
-        let _ = iteration2(b);
+        let _ = extract_key(b);
     }
-    info!("Time spent with iteration2: {:?}", Instant::now() - start);
-    let start = Instant::now();
-    for _ in 1..num_runs {
-        let _ = iteration1(b);
-    }
-    info!("Time spent with iteration1: {:?}", Instant::now() - start);
-    let start = Instant::now();
-    for _ in 1..num_runs {
-        let _ = iteration2(b);
-    }
-    info!("Time spent with iteration2: {:?}", Instant::now() - start);
-    let start = Instant::now();
-    for _ in 1..num_runs {
-        let _ = iteration1(b);
-    }
-    info!("Time spent with iteration1 again: {:?}", Instant::now() - start);
-    let start = Instant::now();
-    for _ in 1..num_runs {
-        let _ = iteration2(b);
-    }
-    info!("Time spent with iteration2 again: {:?}", Instant::now() - start);
-    let start = Instant::now();
-    for _ in 1..num_runs {
-        let _ = iteration1(b);
-    }
-    info!("Time spent with iteration1 again: {:?}", Instant::now() - start);
-    let start = Instant::now();
-    for _ in 1..num_runs {
-        let _ = iteration2(b);
-    }
-    info!("Time spent with iteration2 again: {:?}", Instant::now() - start);
+    info!("Time spent with extract_key: {:?}", Instant::now() - start);
 }
 
-pub fn iteration1(bytes: &[u8]) -> Result<usize, RedisError> {
-    let mut index = 0;
-    let mut bytes_iter = bytes.iter();
-
-    // skip 1
-    /*
-    let mut b = match bytes_iter.next() {
-        Some(byte) => *byte,
-        None => { return Err(RedisError::Unknown); }
-    };
-    while b != '\n' as u8 {
-        index += 1;
-        b = match bytes_iter.next() {
-            Some(byte) => *byte,
-            None => { return Err(RedisError::Unknown); }
-        };
-    }
-    index += 1;*/
-
-    try!(skip_past_eol(&mut bytes_iter, &mut index));
-    index += 1;
-    Ok(index)
-}
-
-pub fn iteration2(bytes: &[u8]) -> Result<usize, RedisError> {
-    let mut index = 0;
-    let mut bytes_iter = bytes.iter();
-
-    // skip 1
-    let mut b = match bytes_iter.next() {
-        Some(byte) => *byte,
-        None => { return Err(RedisError::Unknown); }
-    };
-    while b != '\n' as u8 {
-        index += 1;
-        b = match bytes_iter.next() {
-            Some(byte) => *byte,
-            None => { return Err(RedisError::Unknown); }
-        };
-    }
-    index += 1;
-    Ok(index)
-}
-
-fn skip_past_eol(iter: &mut Iter<u8>, index: &mut usize) -> Result<(), RedisError> {
-    let mut b = match iter.next() {
-        Some(byte) => *byte,
-        None => { return Err(RedisError::Unknown); }
-    };
-    while b != '\n' as u8 {
-        *index += 1;
-        b = match iter.next() {
-            Some(byte) => *byte,
-            None => { return Err(RedisError::Unknown); }
-        };
-    }
-    // return number of steps forward taken.
-    return Ok(());
-}
-
-fn skip_past_eol2(bytes: &[u8], index: &mut usize) -> Result<(), RedisError> {
+fn skip_past_eol(bytes: &[u8], index: &mut usize) -> Result<(), RedisError> {
     match memchr('\n' as u8, bytes) {
         Some(delta) => {
             *index += delta + 1;
@@ -158,95 +59,7 @@ fn skip_past_eol2(bytes: &[u8], index: &mut usize) -> Result<(), RedisError> {
     }
 }
 
-fn skip_bytes(num_bytes: usize, iter: &mut Iter<u8>, index: &mut usize) -> Result<u8, RedisError> {
-    *index += num_bytes + 1;
-    let c = match iter.nth(num_bytes) {
-        Some(c) => *c,
-        None => { return Err(RedisError::InvalidProtocol); }
-    };
-    return Ok(c);
-}
-
-fn next_byte(iter: &mut Iter<u8>, index: &mut usize) -> Result<u8, RedisError> {
-    let b = match iter.next() {
-        Some(b) => *b,
-        None => { return Err(RedisError::InvalidProtocol); }
-    };
-    *index += 1;
-    return Ok(b);
-}
-
-fn parse_num_bytes(first_byte: u8, iter: &mut Iter<u8>, index: &mut usize) -> Result<isize, RedisError> {
-    let b = first_byte;
-    if b != '$' as u8 {
-        //debug!("Expected a - but got {:?} instead", b as char);
-        return Err(RedisError::InvalidProtocol);
-    }
-
-    return interpret_num(iter, index);
-}
-
-fn parse_num(iter: &mut Iter<u8>, index: &mut usize, bytes: &[u8]) -> Result<isize, RedisError> {
-    // parse the integer.
-    let start_index = *index;
-    let mut b = try!(next_byte(iter, index));
-    while b != '\n' as u8 {
-        *index += 1;
-        b = match iter.next() {
-            Some(byte) => *byte,
-            None => { return Err(RedisError::Unknown); }
-        };
-    }
-    let raw_num = unsafe {
-        bytes.get_unchecked(start_index..*index-2)
-    };
-    let num = match std::str::from_utf8(raw_num) {
-        Ok(n) => {
-            match n.parse::<isize>() {
-                Ok(n) => n,
-                Err(_err) => { return Err(RedisError::InvalidProtocol); }
-            }
-        }
-        Err(_error) => { return Err(RedisError::InvalidProtocol); }
-    };
-    return Ok(num);
-}
-
-fn interpret_num(bytes_iter: &mut Iter<u8>, index: &mut usize) -> Result<isize, RedisError> {
-    let mut negative = false;
-    let mut result = 0;
-    loop {
-        *index += 1;
-
-        match *bytes_iter.next().unwrap() as char {
-            '0' => { result = result * 10; }
-            '1' => { result = result * 10 + 1; }
-            '2' => { result = result * 10 + 2; }
-            '3' => { result = result * 10 + 3; }
-            '4' => { result = result * 10 + 4; }
-            '5' => { result = result * 10 + 5; }
-            '6' => { result = result * 10 + 6; }
-            '7' => { result = result * 10 + 7; }
-            '8' => { result = result * 10 + 8; }
-            '9' => { result = result * 10 + 9; }
-            '-' => { negative = true; }
-            '\r' => {
-                bytes_iter.next();
-                *index += 1;
-                if negative {
-                    return Ok(-result);
-                } else {
-                    return Ok(result);
-                }
-            }
-            _ => {
-                return Err(RedisError::InvalidProtocol);
-            }
-        }
-    }
-}
-
-fn interpret_num2(bytes: &[u8], index: &mut usize) -> Result<isize, RedisError> {
+fn interpret_num(bytes: &[u8], index: &mut usize) -> Result<isize, RedisError> {
     let mut negative = false;
     let mut result = 0;
     loop {
@@ -280,6 +93,7 @@ fn interpret_num2(bytes: &[u8], index: &mut usize) -> Result<isize, RedisError> 
 #[test]
 fn test_extract_redis_command() {
     init_logging();
+
     let a = "$-1\r\naeras".to_string();
     let resp = extract_redis_command(&a.as_bytes());
     assert_eq!(resp, Ok("$-1\r\n".as_bytes()));
@@ -302,63 +116,62 @@ fn test_extract_redis_command() {
 
     let a = "*3\r\n+dera\r\n$2\r\nab\r\n*2\r\n$4\r\nBLAR\r\n:34\r\nadaerare".to_string();
     let resp = extract_redis_command(&a.as_bytes());
-    assert_eq!(resp, Ok("*3\r\n+dera\r\n$2\r\nab\r\n*2\r\n$4\r\nBLAR\r\n:34\r\n".as_bytes()));
-
-
-
-    let a = "$-1\r\naeras".to_string();
-    let resp = extract_redis_command2(&a.as_bytes());
-    assert_eq!(resp, Ok("$-1\r\n".as_bytes()));
-
-    let a = "+THREE\r\naeras".to_string();
-    let resp = extract_redis_command2(&a.as_bytes());
-    assert_eq!(resp, Ok("+THREE\r\n".as_bytes()));
-
-    let a = "-FERAC\r\ndera".to_string();
-    let resp = extract_redis_command2(&a.as_bytes());
-    assert_eq!(resp, Ok("-FERAC\r\n".as_bytes()));
-
-    let a = ":1234567\r\ndera".to_string();
-    let resp = extract_redis_command2(&a.as_bytes());
-    assert_eq!(resp, Ok(":1234567\r\n".as_bytes()));
-
-    let a = "$4\r\nTHRE\r\ndera".to_string();
-    let resp = extract_redis_command2(&a.as_bytes());
-    assert_eq!(resp, Ok("$4\r\nTHRE\r\n".as_bytes()));
-
-    let a = "*3\r\n+dera\r\n$2\r\nab\r\n*2\r\n$4\r\nBLAR\r\n:34\r\nadaerare".to_string();
-    let resp = extract_redis_command2(&a.as_bytes());
     assert_eq!(resp, Ok("*3\r\n+dera\r\n$2\r\nab\r\n*2\r\n$4\r\nBLAR\r\n:34\r\n".as_bytes()));
 }
 
-pub fn extract_redis_command2(bytes: &[u8]) -> Result<&[u8], RedisError> {
+#[test]
+fn test_extract_redis_command_speed() {
+    let num_runs = 10000000;
+    init_logging_info();
+    let a = "$4\r\nTHRE\r\ndera".to_string();
+    let b = a.as_bytes();
+
+    let start = Instant::now();
+    for _ in 1..num_runs {
+        let _ = extract_redis_command(b);
+    }
+    info!("Time spent with extract_redis_command: {:?}", Instant::now() - start);
+
+    let start = Instant::now();
+    for _ in 1..num_runs {
+        let _ = extract_redis_command(b);
+    }
+    info!("Time spent with extract_redis_command: {:?}", Instant::now() - start);
+}
+
+
+pub fn extract_redis_command(bytes: &[u8]) -> Result<&[u8], RedisError> {
     let mut index = 0;
-    try!(parse_redis_request2(bytes, &mut index));
+    try!(parse_redis_request(bytes, &mut index));
     return unsafe { Ok(bytes.get_unchecked(0..index)) };
 }
-fn parse_redis_request2(bytes: &[u8], index: &mut usize) -> Result<(), RedisError> {
+
+/*
+    Iterates through one redis request in bytes, moving the index to the end of the request.
+*/
+fn parse_redis_request(bytes: &[u8], index: &mut usize) -> Result<(), RedisError> {
     match *bytes.get(*index).unwrap() as char {
         '+' =>  {
             *index += 1;
             let bytes2 = unsafe { bytes.get_unchecked(*index..) };
-            try!(skip_past_eol2(bytes2, index));
+            try!(skip_past_eol(bytes2, index));
             return Ok(());
         }
         '-' =>  {
             *index += 1;
             let bytes2 = unsafe { bytes.get_unchecked(*index..) };
-            try!(skip_past_eol2(bytes2, index));
+            try!(skip_past_eol(bytes2, index));
             return Ok(());
         }
         ':' =>  {
             *index += 1;
             let bytes2 = unsafe { bytes.get_unchecked(*index..) };
-            try!(skip_past_eol2(bytes2, index));
+            try!(skip_past_eol(bytes2, index));
             return Ok(());
         }
         '$' => {
             *index += 1;
-            let num = try!(interpret_num2(bytes, index));
+            let num = try!(interpret_num(bytes, index));
             *index += 2;
             if num < 0 {
                 return Ok(());
@@ -368,155 +181,15 @@ fn parse_redis_request2(bytes: &[u8], index: &mut usize) -> Result<(), RedisErro
         }
         '*' => {
             *index += 1;
-            let num = try!(interpret_num2(bytes, index));
+            let num = try!(interpret_num(bytes, index));
             *index += 2;
             for _ in 0..num {
-                try!(parse_redis_request2(bytes, index));
+                try!(parse_redis_request(bytes, index));
             }
             return Ok(());
             
         }
         _ => { return Err(RedisError::InvalidProtocol); }
-    }
-}
-
-
-pub fn extract_redis_command(bytes: &[u8]) -> Result<&[u8], RedisError> {
-    let mut bytes_iter = bytes.iter();
-    let mut index = 0;
-    try!(parse_redis_request(&mut bytes_iter, &mut index, bytes));
-    return unsafe { Ok(bytes.get_unchecked(0..index)) };
-    /*
-    match *bytes_iter.next().unwrap() as char {
-        '+' =>  {
-            try!(skip_past_eol(&mut bytes_iter, &mut index));
-            return unsafe {
-                Ok(bytes.get_unchecked(0..index+1))
-            }
-        }
-        '-' =>  {
-            try!(skip_past_eol(&mut bytes_iter, &mut index));
-            return unsafe {
-                Ok(bytes.get_unchecked(0..index+1))
-            };
-        }
-        ':' =>  {
-            try!(skip_past_eol(&mut bytes_iter, &mut index));
-            return unsafe {
-                Ok(bytes.get_unchecked(0..index+1))
-            }
-        }
-        '$' => {
-            let num = try!(parse_num(&mut bytes_iter, &mut index, bytes));
-            return unsafe {
-                Ok(bytes.get_unchecked(0..index+num+2))
-            };
-        }
-        '*' => {
-            let num = try!(parse_num(&mut bytes_iter, &mut index, bytes));
-            for _ in 0..num {
-            }
-            panic!("not done");
-
-        }
-        _ => { return Err(RedisError::InvalidProtocol); }
-    }*/
-}
-fn parse_redis_request(bytes_iter: &mut Iter<u8>, index: &mut usize, bytes: &[u8]) -> Result<(), RedisError> {
-    *index += 1;
-    match *bytes_iter.next().unwrap() as char {
-        '+' =>  {
-            try!(skip_past_eol(bytes_iter, index));
-            *index += 1;
-            return Ok(());
-        }
-        '-' =>  {
-            try!(skip_past_eol(bytes_iter, index));
-            *index += 1;
-            return Ok(());
-        }
-        ':' =>  {
-            try!(skip_past_eol(bytes_iter, index));
-            *index += 1;
-            return Ok(());
-        }
-        '$' => {
-            let num = try!(interpret_num(bytes_iter, index));
-            if num < 0 {
-                return Ok(());
-            }
-            try!(skip_bytes(num as usize + 1, bytes_iter, index));
-            return Ok(());
-        }
-        '*' => {
-            let num = try!(interpret_num(bytes_iter, index));
-            for _ in 0..num {
-                try!(parse_redis_request(bytes_iter, index, bytes));
-            }
-            return Ok(());
-            
-        }
-        _ => { return Err(RedisError::InvalidProtocol); }
-    }
-}
-
-pub fn extract_key2(bytes: &[u8]) -> Result<&[u8], RedisError> {
-    if bytes[0] == '*' as u8 {
-        // then it is standard redis protcol.
-        let mut index = 0;
-        let mut bytes_iter = bytes.iter();
-
-        // skip 1
-        try!(skip_past_eol(&mut bytes_iter, &mut index));
-        let byte = try!(next_byte(&mut bytes_iter, &mut index));
-        let num = try!(parse_num_bytes(byte, &mut bytes_iter, &mut index)) as usize;
-
-        // grab the command list.
-        let command = unsafe {
-            bytes.get_unchecked(index+1..index+num+1)
-        };
-        //debug!("Parsed command: {:?}", std::str::from_utf8(command));
-
-        match supported_keys(command) {
-            KeyPosition::Unsupported => { return Err(RedisError::UnsupportedCommand); }
-            KeyPosition::None => { return Err(RedisError::Unknown); }
-            KeyPosition::Next => {
-                let c = try!(skip_bytes(num+ 2, &mut bytes_iter, &mut index));
-                let num = try!(parse_num_bytes(c, &mut bytes_iter, &mut index)) as usize;
-
-                // TODO: Account fro num being -1.
-
-                // grab the command list.
-                let key = unsafe {
-                    bytes.get_unchecked(index+1..index+num+1)
-                };
-                return Ok(key);
-            }
-            KeyPosition::Eval => {
-                let c = try!(skip_bytes(num+ 2, &mut bytes_iter, &mut index));
-                let num = try!(parse_num_bytes(c, &mut bytes_iter, &mut index)) as usize;
-                
-                let c = try!(skip_bytes(num+ 2, &mut bytes_iter, &mut index));
-                let num = try!(parse_num_bytes(c, &mut bytes_iter, &mut index)) as usize;
-
-                let num_keys = unsafe {
-                    bytes.get_unchecked(index+1..index+num+1)
-                };
-                if num_keys != ['1' as u8] {
-                    return Err(RedisError::InvalidScript);
-                }
-
-                let c = try!(skip_bytes(num+ 2, &mut bytes_iter, &mut index));
-                let num = try!(parse_num_bytes(c, &mut bytes_iter, &mut index)) as usize;
-
-                let key = unsafe {
-                    bytes.get_unchecked(index+1..index+num+1)
-                };
-                return Ok(key);
-            }
-        };
-    } else {
-        panic!("Unimplemented support for plain text commands");
     }
 }
 
@@ -526,14 +199,14 @@ pub fn extract_key(bytes: &[u8]) -> Result<&[u8], RedisError> {
         let mut index = 0;
 
         // skip 1
-        try!(skip_past_eol2(&bytes, &mut index));
+        try!(skip_past_eol(&bytes, &mut index));
 
         // verify next byte is '$'
         if '$' as u8 != unsafe { *bytes.get_unchecked(index) } {
             return Err(RedisError::InvalidProtocol);
         }
         index += 1;
-        let num = try!(interpret_num2(bytes, &mut index)) as usize;
+        let num = try!(interpret_num(bytes, &mut index)) as usize;
         index += 2;
 
         // grab the command list.
@@ -543,7 +216,6 @@ pub fn extract_key(bytes: &[u8]) -> Result<&[u8], RedisError> {
 
         match supported_keys(command) {
             KeyPosition::Unsupported => { return Err(RedisError::UnsupportedCommand); }
-            KeyPosition::None => { return Err(RedisError::Unknown); }
             KeyPosition::Next => {
                 index += num + 2;
 
@@ -551,7 +223,7 @@ pub fn extract_key(bytes: &[u8]) -> Result<&[u8], RedisError> {
                     return Err(RedisError::InvalidProtocol);
                 }
                 index += 1;
-                let num = try!(interpret_num2(bytes, &mut index)) as usize;
+                let num = try!(interpret_num(bytes, &mut index)) as usize;
                 index += 2;
                 // TODO: Account fro num being -1.
 
@@ -567,7 +239,7 @@ pub fn extract_key(bytes: &[u8]) -> Result<&[u8], RedisError> {
                     return Err(RedisError::InvalidProtocol);
                 }
                 index += 1;
-                let num = try!(interpret_num2(bytes, &mut index)) as usize;
+                let num = try!(interpret_num(bytes, &mut index)) as usize;
                 index += 2;
                 
                 index += num + 2;
@@ -575,7 +247,7 @@ pub fn extract_key(bytes: &[u8]) -> Result<&[u8], RedisError> {
                     return Err(RedisError::InvalidProtocol);
                 }
                 index += 1;
-                let num = try!(interpret_num2(bytes, &mut index)) as usize;
+                let num = try!(interpret_num(bytes, &mut index)) as usize;
                 index += 2;
 
                 let num_keys = unsafe {
@@ -590,7 +262,7 @@ pub fn extract_key(bytes: &[u8]) -> Result<&[u8], RedisError> {
                     return Err(RedisError::InvalidProtocol);
                 }
                 index += 1;
-                let num = try!(interpret_num2(bytes, &mut index)) as usize;
+                let num = try!(interpret_num(bytes, &mut index)) as usize;
                 index += 2;
 
                 let key = unsafe {
@@ -1136,37 +808,4 @@ fn str17compare(byte: &[u8], c1: char, c2: char, c3: char, c4: char, c5: char, c
             (byte.get_unchecked(15) == c16 || &(byte.get_unchecked(15) + 0x20u8) == c16) &&
             (byte.get_unchecked(16) == c17 || &(byte.get_unchecked(16) + 0x20u8) == c17);
     }
-}
-
-#[test]
-fn test_parsing_speed() {
-    let num_runs = 10000000;
-    init_logging_info();
-    let a = "*2\r\n$3\r\nGET\r\n$4\r\nkey1\r\n".to_string();
-    let b = a.as_bytes();
-
-    // Using this test function to test how fast hashing can be.
-    let start = Instant::now();
-    for _ in 1..num_runs {
-        let _ = extract_key(b);
-    }
-    info!("Time spent with extract_key: {:?}", Instant::now() - start);
-
-    let start = Instant::now();
-    for _ in 1..num_runs {
-        let _ = extract_key2(b);
-    }
-    info!("Time spent with extract_key2: {:?}", Instant::now() - start);
-
-    let start = Instant::now();
-    for _ in 1..num_runs {
-        let _ = extract_key(b);
-    }
-    info!("Time spent with extract_key: {:?}", Instant::now() - start);
-
-    let start = Instant::now();
-    for _ in 1..num_runs {
-        let _ = extract_key2(b);
-    }
-    info!("Time spent with extract_key2: {:?}", Instant::now() - start);
 }
