@@ -1,3 +1,4 @@
+use redisprotocol::handle_slotsmap;
 use redisprotocol::WriteError;
 use std::net::SocketAddr;
 use redflareproxy::PoolTokenValue;
@@ -11,210 +12,12 @@ use hashbrown::HashMap;
 use crc16::*;
 use mio::{Token, Poll};
 use std::time::Instant;
-use std::str::FromStr;
-use std::str::CharIndices;
 use std::cell::{RefCell};
 use std::rc::Rc;
-use std::ops::Index;
 use std;
 use redisprotocol::extract_key;
 
 pub type Host = String;
-
-#[cfg(test)]
-use log4rs;
-#[cfg(test)]
-use log::LogLevelFilter;
-#[cfg(test)]
-use log4rs::append::console::ConsoleAppender;
-#[cfg(test)]
-use log4rs::config::{Appender, Config, Root};
-#[cfg(test)]
-pub fn init_logging() {
-    let stdout = ConsoleAppender::builder().build();
-    let config = 
-            Config::builder()
-                .appender(Appender::builder().build("stdout", Box::new(stdout)))
-                .build(Root::builder().appender("stdout").build(LogLevelFilter::Debug))
-                .unwrap();
-
-    match log4rs::init_config(config) {
-        Ok(_) => {},
-        Err(logger_error) => {
-            println!("Logging error: {:?}", logger_error);
-            return;
-        }
-    };
-}
-#[cfg(test)]
-pub fn init_logging_info() {
-    let stdout = ConsoleAppender::builder().build();
-    let config = 
-            Config::builder()
-                .appender(Appender::builder().build("stdout", Box::new(stdout)))
-                .build(Root::builder().appender("stdout").build(LogLevelFilter::Info))
-                .unwrap();
-
-    match log4rs::init_config(config) {
-        Ok(_) => {},
-        Err(logger_error) => {
-            println!("Logging error: {:?}", logger_error);
-            return;
-        }
-    };
-}
-
-#[test]
-fn test_slotsmap() {
-    init_logging();
-    let r = "*3\r\n*3\r\n:10922\r\n:16382\r\n*2\r\n$9\r\n127.0.0.1\r\n:7002\r\n*3\r\n:1\r\n:5460\r\n*2\r\n$9\r\n127.0.0.1\r\n:7000\r\n*3\r\n:5461\r\n:10921\r\n*2\r\n$9\r\n127.0.0.1\r\n:7001\r\n";
-    let mut assigned_slots : Vec<Host>  = vec!["".to_owned(); 16384];
-    {
-    let mut count_slots = |host:String, start: usize, end: usize| {
-        for i in start..end+1 {
-            assigned_slots.remove(i-1);
-            assigned_slots.insert(i-1, host.clone());
-        }
-    };
-    handle_slotsmap(r.to_owned(), &mut count_slots);
-    }
-    for i in 0..5460 {
-        assert_eq!(assigned_slots.get(i), Some(&"127.0.0.1:7000".to_owned()))
-    }
-    for i in 5460..10921 {
-        assert_eq!(assigned_slots.get(i), Some(&"127.0.0.1:7001".to_owned()))
-    }
-    for i in 10921..16382 {
-        assert_eq!(assigned_slots.get(i), Some(&"127.0.0.1:7002".to_owned()))
-    }
-}
-
-// TODO: Move this to redisprotocol?
-fn handle_slotsmap(
-    response: String,
-    handle_slots: &mut FnMut(String, usize, usize)
-) {
-    if response.len() == 0 {
-        return;
-    }
-    let mut copy = response.clone();
-    copy = str::replace(copy.as_str(), "\r", "\\r");
-    copy = str::replace(copy.as_str(), "\n", "\\n\n");
-    debug!("Handling slots map:\n{}", copy);
-    // Populate the slots map.
-
-    let mut chars = response.char_indices();
-    let mut current_char = chars.next().unwrap();
-    if current_char.1 != '*' {
-        error!("Parse error: expected * at start of response. Found {:?} instead.", current_char);
-    }
-    let starting_index = parse_int(&mut chars, response.as_str());
-
-    for _ in 0..starting_index {
-        current_char = chars.next().unwrap();
-        if current_char.1 != '*' {
-            error!("Parse error: expected * at start of response. Found {:?} instead.", current_char);
-        }
-        let parsed_resp_length = parse_int(&mut chars, response.as_str());
-        if parsed_resp_length < 3 {
-            error!("Parse error: expected at least 3 lines for each response. Parsed {} instead.", parsed_resp_length);
-        }
-        // First two lines arer for slot range.
-        // Next ones are for master and replicas.
-    
-        let mut hostname = "".to_string();
-        let mut identifier = "".to_string();
-
-        // Parse starting slot range.
-        current_char = chars.next().unwrap();
-        if current_char.1 != ':' {
-            error!("Parse error: expected : at start of line to mark second level of array. Found {:?} instead.", current_char);
-        }
-        let starting_slot = parse_int(&mut chars, response.as_str());
-
-        // Parse ending slot range.
-        if chars.next().unwrap().1 != ':' {
-            error!("parse error: expected :");
-        }
-        let ending_slot = parse_int(&mut chars, response.as_str());
-
-        for _ in 0..parsed_resp_length-2 {
-            current_char = chars.next().unwrap();
-            if current_char.1 != '*' {
-                error!("Parse error: expected * at start of response. Found {:?} instead.", current_char);
-            }
-            let parsed_slot_array_length = parse_int(&mut chars, response.as_str());
-            // Can be 2 for older redis versions, and 3 for newer redis versions.
-
-            current_char = chars.next().unwrap();
-            if current_char.1 != '$' {
-                error!("Parse error: 1st expected $ at start of line to mark second level of array. Found {:?} instead.", current_char);
-            }
-            let parsed_string_length = parse_int(&mut chars, response.as_str());
-            for _ in 0..parsed_string_length {
-                hostname.push(chars.next().unwrap().1);
-            }
-            expect_eol(&mut chars);
-
-            current_char = chars.next().unwrap();
-            if current_char.1 != ':' {
-                error!("Parse error: expected : at start of line to mark second level of array. Found {:?} instead.", current_char);
-            }
-            let port = parse_int(&mut chars, response.as_str());
-
-            if parsed_slot_array_length > 2 {
-                current_char = chars.next().unwrap();
-                if current_char.1 != '$' {
-                    error!("Parse error: 2nd expected $ at start of line to mark second level of array. Found {:?} instead.", current_char);
-                }
-                let parsed_string_length = parse_int(&mut chars, response.as_str());
-                for _ in 0..parsed_string_length {
-                    identifier.push(chars.next().unwrap().1);
-                }
-            }
-
-            // TODO. only do this for first one.
-            let host = format!("{}:{}", hostname, port);
-            handle_slots(host, starting_slot, ending_slot);
-            expect_eol(&mut chars);
-        }
-    }
-}
-
-fn expect_eol(chars: &mut CharIndices) {
-    let mut next = chars.next().unwrap();
-    if next.1 != '\r' {
-        error!("Parse error: expected \\r, found {:?} instead.", next);
-    }
-    next = chars.next().unwrap();
-    if next.1 != '\n' {
-        error!("Parse error: expected \\n, found {:?} instead.", next);
-    }
-}
-
-fn parse_int(chars: &mut CharIndices, whole_string: &str) -> usize {
-    let starting_index = match chars.next().unwrap() {
-        (index, character) => {
-            if !character.is_numeric() && character != '0' {
-                panic!("Expected a numeric character, found {:?} instead!", character);
-            }
-            index
-        }
-    };
-    loop {
-        match chars.next().unwrap() {
-            (index, character) => {
-                if character == '\r' {
-                    chars.next();
-                    return usize::from_str(whole_string.index(std::ops::Range { start: starting_index, end: index})).unwrap();
-                }
-                if !character.is_numeric() {
-                    panic!("Expected a numeric character, found {:?} instead!", character);
-                }
-            }
-        }
-    }
-}
 
 pub struct ClusterBackend {
     hostnames: HashMap<Host, BackendToken>,
@@ -323,7 +126,7 @@ impl ClusterBackend {
         self.pool_token = new_token_value;
     }
  
-    pub fn is_available(&mut self) -> bool {
+    pub fn is_available(&self) -> bool {
         return self.status == BackendStatus::READY;
     }
 
@@ -335,16 +138,9 @@ impl ClusterBackend {
             // whether cluster needs to connect to all hosts, or just try one.
             backend.init_connection();
         }
-        self.change_state(BackendStatus::CONNECTING);
+        change_state(&mut self.status, BackendStatus::CONNECTING);
     }
 
-    fn initialize_slotmap(&mut self, backend_token: BackendToken, cluster_backends: &mut Vec<(SingleBackend, usize)>) -> Result<(), WriteError> {
-        let cluster_index = convert_token_to_cluster_index(backend_token.0);
-        let ref mut host = cluster_backends.get_mut(cluster_index).unwrap().0;
-        try!(host.write_message(b"*2\r\n$7\r\nCLUSTER\r\n$5\r\nSLOTS\r\n", NULL_TOKEN));
-        self.queue.push_back(host.queue.back().unwrap().clone());
-        return Ok(());
-    }
 
     pub fn handle_backend_response(
         &mut self,
@@ -359,17 +155,18 @@ impl ClusterBackend {
         let cluster_index = convert_token_to_cluster_index(backend_token.0);
         let unhandled_responses = cluster_backends.get_mut(cluster_index).unwrap().0.handle_backend_response(clients);
 
-        let prev_state = self.status;
-        if prev_state == BackendStatus::CONNECTING {
-            if self.initialize_slotmap(backend_token, cluster_backends).is_ok() {
-                self.change_state(BackendStatus::LOADING);
+        // This should only fire once for the cluster.
+        if self.status == BackendStatus::CONNECTING {
+            if initialize_slotmap(&mut self.queue, backend_token, cluster_backends).is_ok() {
+                change_state(&mut self.status, BackendStatus::LOADING);
             }
         }
 
+        let mut initialized_slotsmap = false;
         // TODO: Handle multiple responses. Assuming it's slotsmap.
         for response in unhandled_responses {
             {
-                let mut register_backend = |host:String, start: usize, end: usize| {
+                {let mut register_backend = |host:String, start: usize, end: usize| {
                     debug!("Backend slots map registered! {} From {} to {}", host, start, end);
 
                     for i in start..end+1 {
@@ -385,9 +182,42 @@ impl ClusterBackend {
                         cluster_backends.get_mut(cluster_index).unwrap().0.init_connection();
                     }
                 };
-                handle_slotsmap(response.clone(), &mut register_backend);
+                match handle_slotsmap(&response, &mut register_backend) {
+                    Ok(_) => {
+                        initialized_slotsmap = true;
+                        continue;
+                    }
+                    Err(err) => {
+                    }
+                }}
+
+                        // Bad slotsmap response. Mark the cluster backend as down, and should mark self as CONNECTING against.
+                        // In addition, we need to send another initiale_slotsmap request. Perhaps it's simplest to retry everything?
+                        cluster_backends.get_mut(cluster_index).unwrap().0.disconnect();
             }
-            self.change_state(BackendStatus::READY);
+
+            // Change status from LOADING to READY. This 
+            if initialized_slotsmap {
+                change_state(&mut self.status, BackendStatus::READY);
+            } else {
+                // Send another initialize_slotsmap.
+                for (_, b_token) in self.hostnames.iter() {
+                    let cluster_index = convert_token_to_cluster_index(b_token.0);
+                    let available = {
+                        let cluster_backend = &cluster_backends.get(cluster_index).unwrap().0;
+                        cluster_backend.is_available()
+                    };
+                    if available {
+                        if initialize_slotmap(&mut self.queue, *b_token, cluster_backends).is_ok() {
+                            change_state(&mut self.status, BackendStatus::LOADING);
+                            break;
+                        }
+                    }
+                }
+                // If none available, just wait, just set to CONNECTING>
+                // But want to check that there are backends that are connecting.
+                change_state(&mut self.status, BackendStatus::CONNECTING);
+            }
             return;
         }
     }
@@ -400,35 +230,6 @@ impl ClusterBackend {
     ) {
         let cluster_index = convert_token_to_cluster_index(backend_token.0);
         cluster_backends.get_mut(cluster_index).unwrap().0.handle_backend_failure(clients);
-    }
-
-    fn change_state(&mut self, target_state: BackendStatus) -> bool {
-        if self.status == target_state {
-            return true;
-        }
-        // For cluster, should go from CONNECTING (waiting for connection) => LOADING(Waiting for slotsmap) => READY (slotsmap returned)
-        match (self.status, target_state) {
-            (BackendStatus::DISCONNECTED, BackendStatus::CONNECTING) => {} // called when trying to establish a connection to backend.
-            (BackendStatus::CONNECTING, BackendStatus::LOADING) => {}
-            (BackendStatus::LOADING, BackendStatus::READY) => {}
-
-            // State transitions we want to ignore. Why? Because we don't want to keep track of the fact that we're calling a transition to CONNECTED
-            // twice. Instead, we'll have subsequent transitions just fail silently.
-            (BackendStatus::READY, BackendStatus::LOADING) => {
-                return true;
-            }
-
-            (BackendStatus::CONNECTING, BackendStatus::DISCONNECTED) => {} // Happens when the establishing connection to backend has timed out.
-            (BackendStatus::LOADING, BackendStatus::DISCONNECTED) => {}
-            (BackendStatus::READY, BackendStatus::DISCONNECTED) => {} // happens when host has been blacked out from too many failures/timeouts.
-            _ => {
-                debug!("ClusterBackend {:?} failed to change state from {:?} to {:?}", self.token, self.status, target_state);
-                panic!("Failure to change states");
-            }
-        }
-        debug!("ClusterBackend {:?} changed state from {:?} to {:?}", self.token, self.status, target_state);
-        self.status = target_state;
-        return true;
     }
 
     // callback when a timeout has occurred.
@@ -490,4 +291,41 @@ impl ClusterBackend {
         self.queue.push_back(cluster_backends.get(cluster_index).unwrap().0.queue.back().unwrap().clone());
         return Ok(());
     }
+}
+
+fn initialize_slotmap(queue: &mut VecDeque<(ClientToken, Instant)>, backend_token: BackendToken, cluster_backends: &mut Vec<(SingleBackend, usize)>) -> Result<(), WriteError> {
+    let cluster_index = convert_token_to_cluster_index(backend_token.0);
+    let ref mut host = cluster_backends.get_mut(cluster_index).unwrap().0;
+    try!(host.write_message(b"*2\r\n$7\r\nCLUSTER\r\n$5\r\nSLOTS\r\n", NULL_TOKEN));
+    queue.push_back(host.queue.back().unwrap().clone());
+    return Ok(());
+}
+
+fn change_state(status: &mut BackendStatus, target_state: BackendStatus) -> bool {
+    if *status == target_state {
+        return true;
+    }
+    // For cluster, should go from CONNECTING (waiting for connection) => LOADING(Waiting for slotsmap) => READY (slotsmap returned)
+    match (*status, target_state) {
+        (BackendStatus::DISCONNECTED, BackendStatus::CONNECTING) => {} // called when trying to establish a connection to backend.
+        (BackendStatus::CONNECTING, BackendStatus::LOADING) => {}
+        (BackendStatus::LOADING, BackendStatus::READY) => {}
+
+        // State transitions we want to ignore. Why? Because we don't want to keep track of the fact that we're calling a transition to CONNECTED
+        // twice. Instead, we'll have subsequent transitions just fail silently.
+        (BackendStatus::READY, BackendStatus::LOADING) => {
+            return true;
+        }
+
+        (BackendStatus::CONNECTING, BackendStatus::DISCONNECTED) => {} // Happens when the establishing connection to backend has timed out.
+        (BackendStatus::LOADING, BackendStatus::DISCONNECTED) => {}
+        (BackendStatus::READY, BackendStatus::DISCONNECTED) => {} // happens when host has been blacked out from too many failures/timeouts.
+        _ => {
+            debug!("ClusterBackend failed to change state from {:?} to {:?}", status, target_state);
+            panic!("Failure to change states");
+        }
+    }
+    debug!("ClusterBackend changed state from {:?} to {:?}", status, target_state);
+    *status = target_state;
+    return true;
 }

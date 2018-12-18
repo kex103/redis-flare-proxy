@@ -37,6 +37,43 @@ mod backendpool;
 mod redisprotocol;
 mod hash;
 
+
+#[cfg(test)]
+pub fn init_logging() {
+    let stdout = ConsoleAppender::builder().build();
+    let config = 
+            Config::builder()
+                .appender(Appender::builder().build("stdout", Box::new(stdout)))
+                .build(Root::builder().appender("stdout").build(LogLevelFilter::Debug))
+                .unwrap();
+
+    match log4rs::init_config(config) {
+        Ok(_) => {},
+        Err(logger_error) => {
+            println!("Logging error: {:?}", logger_error);
+            return;
+        }
+    };
+}
+#[cfg(test)]
+pub fn init_logging_info() {
+    let stdout = ConsoleAppender::builder().build();
+    let config = 
+            Config::builder()
+                .appender(Appender::builder().build("stdout", Box::new(stdout)))
+                .build(Root::builder().appender("stdout").build(LogLevelFilter::Info))
+                .unwrap();
+
+    match log4rs::init_config(config) {
+        Ok(_) => {},
+        Err(logger_error) => {
+            println!("Logging error: {:?}", logger_error);
+            return;
+        }
+    };
+}
+
+
 /*
 Entrypoint for redflareproxy.
 */

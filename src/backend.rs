@@ -57,6 +57,7 @@ impl Backend {
         let weight = config.weight;
         let (backend, all_backend_tokens) = match config.use_cluster {
             false => {
+                // The config should be validated to have a host when not using cluster. See load_config.
                 let host = config.host.unwrap().clone();
                 let (backend, tokens) = SingleBackend::new(
                     config,
@@ -107,10 +108,10 @@ impl Backend {
         }
     }
 
-    pub fn is_available(&mut self) -> bool {
+    pub fn is_available(&self) -> bool {
         match self.single {
-            BackendEnum::Single(ref mut backend) => backend.is_available(),
-            BackendEnum::Cluster(ref mut backend) => backend.is_available(),
+            BackendEnum::Single(ref backend) => backend.is_available(),
+            BackendEnum::Cluster(ref backend) => backend.is_available(),
         }
     }
 
@@ -254,7 +255,7 @@ impl SingleBackend {
         self.pool_token = new_token_value;
     }
 
-    pub fn is_available(&mut self) -> bool {
+    pub fn is_available(&self) -> bool {
         return self.status == BackendStatus::READY;
     }
 
@@ -355,7 +356,12 @@ impl SingleBackend {
             return false;
         }
         loop {
-            let timer_poll = self.timer.as_mut().unwrap().poll();
+            let timer_poll = match self.timer {
+                Some(ref mut t) => t.poll(),
+                None => {
+                    panic!("A timeout event occurred without a backend timer being available.");
+                }
+            };
             let target_timestamp = match timer_poll {
                 None => {
                     // TODO: For some reason, poll says timer is activated,but timer itself doesn't think so.
@@ -422,13 +428,21 @@ impl SingleBackend {
         }
     }
 
+    pub fn disconnect(&mut self) {
+        change_state(&mut self.status, BackendStatus::DISCONNECTED);
+        self.failure_count = 0;
+        self.socket = None;
+    }
+
     // Marks the backend as down. Returns an error message to all pending requests.
     // TODO: Is it still needed to have a mark_backend_down AND handle_backend_failure?
-    pub fn mark_backend_down(&mut self, clients: &mut HashMap<usize, (Client, usize)>) {
-        change_state(&mut self.status, BackendStatus::DISCONNECTED);
+    pub fn mark_backend_down(&mut self, clients: &mut HashMap<ClientTokenValue, (Client, PoolTokenValue)>) {
+        self.disconnect();
 
-        self.failure_count = 0;
-
+        // TODO: It's possible that a client sends a request to 1 backend, then another. And the 2nd backend dies before the 1st one finishes.
+        // In that case, the client should get response for the first request first, and then the error message for the second.
+        // Actually, there is a race condition in general, even without any error, if the 2nd backend responds much quicker.
+        // How is this avoided? By only doing one request from the client at a time.
         let mut possible_token = self.queue.pop_front();
         loop {
             match possible_token {
@@ -440,8 +454,6 @@ impl SingleBackend {
             }
             possible_token = self.queue.pop_front();
         }
-
-        self.socket = None;
     }
 
     pub fn write_message(
@@ -462,7 +474,7 @@ impl SingleBackend {
         }
     }
 
-    pub fn handle_backend_response(&mut self, clients: &mut HashMap<usize, (Client, usize)>) -> VecDeque<String> {
+    pub fn handle_backend_response(&mut self, clients: &mut HashMap<usize, (Client, usize)>) -> VecDeque<Vec<u8>> {
         let prev_state = self.status;
         change_state(&mut self.status, BackendStatus::CONNECTED);
         if prev_state == BackendStatus::CONNECTING && self.status == BackendStatus::CONNECTED {
@@ -504,12 +516,17 @@ impl SingleBackend {
     }
 
     fn set_retry_timer(&mut self) {
-        debug!("Creating timer");
-        // Create new timer.
         if self.retry_timer.is_none() {
+        debug!("Creating timer");
             let timer = create_timer();
             let timer_token = Token(self.token.0 + self.num_backends);
-            self.poll_registry.borrow_mut().register(&timer, timer_token, Ready::readable(), PollOpt::edge()).unwrap();
+            match self.poll_registry.borrow_mut().register(&timer, timer_token, Ready::readable(), PollOpt::edge()) {
+                Ok(_) => {}
+                Err(err) => {
+                    // Expected to occur only when timer is registered to a different poll (which shouldn't happen).
+                    panic!("Failed to register retry timer to poll. Received error: {}", err);
+                }
+            };
             self.retry_timer = Some(timer);
         }
 
@@ -518,14 +535,17 @@ impl SingleBackend {
         match self.retry_timer {
             Some(ref mut timer) => {
                 match timer.set_timeout(Duration::new(0, (1000000 * self.retry_timeout) as u32), timestamp) {
-                    Ok(_) => {}
+                    Ok(_) => { }
                     Err(err) => {
                         // Expected to occur only in cases of usize integer overflow.
                         panic!("Failure setting timer timeout: {}.", err);
                     }
                 }
             }
-            None => { panic!("Timer does not exist after being instantiated."); }
+            None => {
+                // Never expected to occur.
+                panic!("Timer does not exist after being instantiated.");
+            }
         }
     }
 
@@ -548,7 +568,13 @@ impl SingleBackend {
                 let timer = create_timer();
                 let timer_token = Token(self.token.0 + 2 * self.num_backends);
                 debug!("Registered timer: {:?}", timer_token);
-                self.poll_registry.borrow_mut().register(&timer, timer_token, Ready::readable(), PollOpt::edge()).unwrap();
+                match self.poll_registry.borrow_mut().register(&timer, timer_token, Ready::readable(), PollOpt::edge()) {
+                    Ok(_) => {}
+                    Err(err) => {
+                        // Expected to occur only when timer is registered to a different poll (which shouldn't happen).
+                        panic!("Failed to register timer to poll. Received error: {}", err);
+                    }
+                };
                 self.timer = Some(timer);
             }
 
@@ -563,14 +589,17 @@ impl SingleBackend {
                     };
                     debug!("Setting timeout: {:?}", timestamp);
                 }
-                None => { panic!("Timer does not exist after being instantiated."); }
+                None => {
+                    // Never expected to occur.
+                    panic!("Timer does not exist after being instantiated.");
+                }
             }
         }
         return Ok(());
     }
 }
 
-fn handle_internal_response(status: &mut BackendStatus, waiting_for_auth_resp: &mut bool, waiting_for_db_resp: &mut bool, waiting_for_ping_resp: &mut bool, response: &[u8], unhandled_queue: &mut VecDeque<String>) {
+fn handle_internal_response(status: &mut BackendStatus, waiting_for_auth_resp: &mut bool, waiting_for_db_resp: &mut bool, waiting_for_ping_resp: &mut bool, response: &[u8], unhandled_queue: &mut VecDeque<Vec<u8>>) {
     // TODO: Handle the various requirements.
     if *waiting_for_auth_resp && response == b"+OK\r\n" {
         *waiting_for_auth_resp = false;
@@ -582,7 +611,7 @@ fn handle_internal_response(status: &mut BackendStatus, waiting_for_auth_resp: &
         *waiting_for_ping_resp = false;
     }
     else {
-        unhandled_queue.push_back(std::str::from_utf8(response).unwrap().to_string());
+        unhandled_queue.push_back(response.to_vec());
         return;
     }
     if !*waiting_for_auth_resp && !*waiting_for_db_resp && !*waiting_for_ping_resp {
@@ -633,7 +662,7 @@ fn route_backend_response(
     waiting_for_auth_resp: &mut bool,
     waiting_for_db_resp: &mut bool,
     waiting_for_ping_resp: &mut bool,
-    unhandled_internal_responses: &mut VecDeque<String>,
+    unhandled_internal_responses: &mut VecDeque<Vec<u8>>,
 ) -> Result<bool, RedisError> {
     match stream {
         Some(ref mut s) => {

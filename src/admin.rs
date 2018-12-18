@@ -18,11 +18,7 @@ pub struct AdminPort {
 
 impl AdminPort {
     pub fn new(config: AdminConfig, poll : &Poll) -> AdminPort {
-        //TODO: Tcp Backlog
-        /*let mut tcp_backlog = 128; // SOMAXCONN
-        if config.get("tcp-backlog") != None {
-            tcp_backlog = config["tcp-backlog"].as_integer().unwrap();
-        }*/
+        // TODO: Add configuration for tcp backlog
 
         let addr = match config.listen.parse() {
             Ok(addr) => addr,

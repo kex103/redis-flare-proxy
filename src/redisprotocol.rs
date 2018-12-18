@@ -1,13 +1,14 @@
+#[cfg(test)]
+use {init_logging, init_logging_info};
+#[cfg(test)]
+use cluster_backend::Host;
 use memchr::memchr;
 use std::result::Result;
 
 #[cfg(test)]
 use std::time::Instant;
-#[cfg(test)]
-use cluster_backend::{init_logging, init_logging_info};
-
-
 use std::fmt;
+
 use std::error;
 use std::net::SocketAddr;
 
@@ -92,7 +93,7 @@ fn skip_past_eol(bytes: &[u8], index: &mut usize) -> Result<(), RedisError> {
     }
 }
 
-fn interpret_num(bytes: &[u8], index: &mut usize) -> Result<isize, RedisError> {
+pub fn interpret_num(bytes: &[u8], index: &mut usize) -> Result<isize, RedisError> {
     let mut negative = false;
     let mut result = 0;
     loop {
@@ -840,5 +841,197 @@ fn str17compare(byte: &[u8], c1: char, c2: char, c3: char, c4: char, c5: char, c
             (byte.get_unchecked(14) == c15 || &(byte.get_unchecked(14) + 0x20u8) == c15) &&
             (byte.get_unchecked(15) == c16 || &(byte.get_unchecked(15) + 0x20u8) == c16) &&
             (byte.get_unchecked(16) == c17 || &(byte.get_unchecked(16) + 0x20u8) == c17);
+    }
+}
+
+pub fn handle_slotsmap(
+    response: &[u8],
+    handle_slots: &mut FnMut(String, usize, usize)
+) -> Result<(), RedisError> {
+    if response.len() == 0 {
+        return Ok(());
+    }
+    /*let mut copy = response.clone();
+    copy = str::replace(copy.as_str(), "\r", "\\r");
+    copy = str::replace(copy.as_str(), "\n", "\\n\n");
+    debug!("Handling slots map:\n{}", copy);*/
+    // Populate the slots map.
+
+    //let mut chars = response.iter();
+    let mut index = 0;
+    let mut current_char = response.get(index).unwrap();
+    index += 1;
+    if *current_char != '*' as u8 {
+        error!("Parse error: expected * at start of response. Found {:?} instead.", *current_char as char);
+        return Err(RedisError::InvalidProtocol);
+    }
+    let starting_index = try!(interpret_num(response, &mut index));
+    index += 2;
+
+    for _ in 0..starting_index {
+        current_char = response.get(index).unwrap();
+        index += 1;
+        if *current_char != '*' as u8 {
+            error!("Parse error: expected * at start of response. Found {:?} instead.", *current_char as char);
+            return Err(RedisError::InvalidProtocol);
+        }
+        //let parsed_resp_length = parse_int(&mut chars, response);
+        let parsed_resp_length = try!(interpret_num(response, &mut index));
+        index += 2;
+        if parsed_resp_length < 3 {
+            error!("Parse error: expected at least 3 lines for each response. Parsed {} instead.", parsed_resp_length);
+            return Err(RedisError::InvalidProtocol);
+        }
+        // First two lines arer for slot range.
+        // Next ones are for master and replicas.
+    
+        let mut hostname = "".to_string();
+        let mut identifier = "".to_string();
+
+        // Parse starting slot range.
+        current_char = response.get(index).unwrap();
+        index += 1;
+        if *current_char != ':' as u8 {
+            error!("Parse error: expected : at start of line to mark second level of array. Found {:?} instead.", current_char);
+            return Err(RedisError::InvalidProtocol);
+        }
+        //let starting_slot = parse_int(&mut chars, response);
+        let starting_slot = try!(interpret_num(response, &mut index));
+        index += 2;
+        if starting_slot < 0 {
+            return Err(RedisError::InvalidProtocol);
+        }
+
+        // Parse ending slot range.
+        if *response.get(index).unwrap() != ':' as u8 {
+            error!("parse error: expected :");
+            return Err(RedisError::InvalidProtocol);
+        }
+        index += 1;
+        //let ending_slot = parse_int(&mut chars, response);
+        let ending_slot = try!(interpret_num(response, &mut index));
+        index += 2;
+        if ending_slot < 0 {
+            return Err(RedisError::InvalidProtocol);
+        }
+
+        for _ in 0..parsed_resp_length-2 {
+            current_char = response.get(index).unwrap();
+            index += 1;
+            if *current_char != '*' as u8 {
+                error!("Parse error: expected * at start of response. Found {:?} instead.", current_char);
+                return Err(RedisError::InvalidProtocol);
+            }
+            let parsed_slot_array_length = try!(interpret_num(response, &mut index));
+            index += 2;
+            // Can be 2 for older redis versions, and 3 for newer redis versions.
+
+            current_char = response.get(index).unwrap();
+            index += 1;
+            if *current_char != '$' as u8 {
+                error!("Parse error: 1st expected $ at start of line to mark second level of array. Found {:?} instead.", current_char);
+                return Err(RedisError::InvalidProtocol);
+            }
+            let parsed_string_length = try!(interpret_num(response, &mut index));
+            index += 2;
+            for _ in 0..parsed_string_length {
+                hostname.push(*response.get(index).unwrap() as char);
+                index += 1;
+            }
+            try!(expect_eol(response, &mut index));
+
+            current_char = response.get(index).unwrap();
+            index += 1;
+            if *current_char != ':' as u8 {
+                error!("Parse error: expected : at start of line to mark second level of array. Found {:?} instead.", current_char);
+                return Err(RedisError::InvalidProtocol);
+            }
+            let port = try!(interpret_num(response, &mut index));
+            index += 2;
+
+            if parsed_slot_array_length > 2 {
+                current_char = response.get(index).unwrap();
+                index += 1;
+                if *current_char != '$' as u8 {
+                    error!("Parse error: 2nd expected $ at start of line to mark second level of array. Found {:?} instead.", current_char);
+                    return Err(RedisError::InvalidProtocol);
+                }
+                let parsed_string_length = try!(interpret_num(response, &mut index));
+                index += 2;
+                for _ in 0..parsed_string_length {
+                    identifier.push(*response.get(index).unwrap() as char);
+                    index += 1;
+                }
+                index += 2;
+            }
+
+            // TODO. only do this for first one.
+            let host = format!("{}:{}", hostname, port);
+            handle_slots(host, starting_slot as usize, ending_slot as usize);
+        }
+    }
+    return Ok(());
+}
+
+fn expect_eol(bytes: &[u8], index: &mut usize) -> Result<(), RedisError> {
+    debug!("Expecitng eol: {}", index);
+    let mut next = bytes.get(*index).unwrap();
+    *index += 1;
+    if *next != '\r' as u8 {
+        error!("Parse error: expected \\r, found {:?} instead.", *next as char);
+        return Err(RedisError::InvalidProtocol);
+    }
+    next = bytes.get(*index).unwrap();
+    *index += 1;
+    if *next != '\n' as u8 {
+        error!("Parse error: expected \\n, found {:?} instead.", next);
+        return Err(RedisError::InvalidProtocol);
+    }
+    return Ok(());
+}
+
+#[test]
+fn test_slotsmap() {
+    init_logging();
+    let r = "*3\r\n*3\r\n:10922\r\n:16382\r\n*2\r\n$9\r\n127.0.0.1\r\n:7002\r\n*3\r\n:1\r\n:5460\r\n*2\r\n$9\r\n127.0.0.1\r\n:7000\r\n*3\r\n:5461\r\n:10921\r\n*2\r\n$9\r\n127.0.0.1\r\n:7001\r\n";
+    let mut assigned_slots : Vec<Host>  = vec!["".to_owned(); 16384];
+    {
+    let mut count_slots = |host:String, start: usize, end: usize| {
+        for i in start..end+1 {
+            assigned_slots.remove(i-1);
+            assigned_slots.insert(i-1, host.clone());
+        }
+    };
+    handle_slotsmap(r.as_bytes(), &mut count_slots).unwrap();
+    }
+    for i in 0..5460 {
+        assert_eq!(assigned_slots.get(i), Some(&"127.0.0.1:7000".to_owned()))
+    }
+    for i in 5460..10921 {
+        assert_eq!(assigned_slots.get(i), Some(&"127.0.0.1:7001".to_owned()))
+    }
+    for i in 10921..16382 {
+        assert_eq!(assigned_slots.get(i), Some(&"127.0.0.1:7002".to_owned()))
+    }
+
+    let r = "*3\r\n*3\r\n:10922\r\n:16382\r\n*3\r\n$9\r\n127.0.0.1\r\n:7002\r\n$40\r\nd0380b35d40bd7f271accef4a3e51d9514c9c645\r\n*3\r\n:1\r\n:5460\r\n*3\r\n$9\r\n127.0.0.1\r\n:7000\r\n$40\r\nef87505cb77d00e9f7886cfecc81413418e95bfd\r\n*3\r\n:5461\r\n:10921\r\n*3\r\n$9\r\n127.0.0.1\r\n:7001\r\n$40\r\nb6caef27795d29d068989e38fec89bc92158930d\r\n";
+        let mut assigned_slots : Vec<Host>  = vec!["".to_owned(); 16384];
+    {
+    let mut count_slots = |host:String, start: usize, end: usize| {
+        for i in start..end+1 {
+            assigned_slots.remove(i-1);
+            assigned_slots.insert(i-1, host.clone());
+        }
+    };
+    handle_slotsmap(r.as_bytes(), &mut count_slots).unwrap();
+    }
+    for i in 0..5460 {
+        assert_eq!(assigned_slots.get(i), Some(&"127.0.0.1:7000".to_owned()))
+    }
+    for i in 5460..10921 {
+        assert_eq!(assigned_slots.get(i), Some(&"127.0.0.1:7001".to_owned()))
+    }
+    for i in 10921..16382 {
+        assert_eq!(assigned_slots.get(i), Some(&"127.0.0.1:7002".to_owned()))
     }
 }
