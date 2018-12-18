@@ -1,15 +1,17 @@
+use redflareproxy::Client;
+use redflareproxy::ClientTokenValue;
+use backend::write_to_stream;
 use redflareproxy::{ADMIN_LISTENER};
 use redflareproxy::{ClientToken};
 use config::{AdminConfig};
 
 use mio::*;
 use std::io::BufReader;
-use mio::tcp::{TcpListener, TcpStream};
+use mio::tcp::{TcpListener};
 use hashbrown::HashMap;
-use std::io::Write;
 
 pub struct AdminPort {
-    pub client_sockets: HashMap<ClientToken, BufReader<TcpStream>>,
+    pub client_sockets: HashMap<ClientTokenValue, Client>,
     pub socket: TcpListener,
     pub config: AdminConfig,
 }
@@ -63,7 +65,7 @@ impl AdminPort {
                             error!("Failed to register admin client socket to poll. Reason: {:?}", error);
                         }
                     };
-                    self.client_sockets.insert(token, BufReader::new(s));
+                    self.client_sockets.insert(token.0, BufReader::new(s));
                 }
                 Err(error) => {
                     if error.kind() == std::io::ErrorKind::WouldBlock {
@@ -77,13 +79,20 @@ impl AdminPort {
     }
 
     pub fn write_to_client(&mut self, client_token: ClientToken, message: String) {
-        match self.client_sockets.get_mut(&client_token) {
+        match self.client_sockets.get_mut(&client_token.0) {
             Some(client_stream) => {
-                client_stream.get_mut().write(&message.into_bytes()[..]);
+                match write_to_stream(client_stream, &message.into_bytes()[..]) {
+                    Ok(_) => { return; }
+                    Err(err) => {
+                        debug!("Unable to write to admin client. Received error: {}", err);
+                    }
+                }
             }
             None => {
                 debug!("No client found for admin: {:?}. Did a switch_config just occur?", client_token);
             }
         }
+
+        self.client_sockets.remove(&client_token.0);
     }
 }

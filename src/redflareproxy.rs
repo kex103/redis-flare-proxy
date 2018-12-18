@@ -388,9 +388,6 @@ impl RedFlareProxy {
         debug!("Event: {:?} {:?}", token, event.readiness());
         if event.readiness().contains(UnixReady::error()) {
             info!("Received unix error");
-            // TODO: Don't want to do mark backend down for client connections.
-            /* Why does the errror occur? How does a backend socket just error? Timeout? Is this on establishing connection?*/
-            // TODO: We want to make sure these tokens that fail are actualy backend tokens. It could be something else, like timers.
             let subscriber = self.identify_token(token);
             match subscriber {
                 SubType::PoolServer => {
@@ -419,18 +416,13 @@ impl RedFlareProxy {
         match subscriber {
             SubType::PoolClient => {
                 debug!("PoolClient {:?}", token);
-                let res = handle_client(
+                handle_client(
                     &mut self.backendpools,
                     &mut self.backends,
                     &mut self.cluster_backends,
                     &mut self.clients,
                     &mut token,
                 );
-                if res != true {
-                    info!("Removing client due to expiration: {:?}", token);
-                    self.clients.remove(&token.0);
-
-                }
             }
             SubType::Timeout => {
                 debug!("RetryTimeout {:?}", token);
@@ -508,7 +500,7 @@ impl RedFlareProxy {
     fn handle_client_socket(&mut self, token: ClientToken) {
         let mut switching_config = false;
         let request = {
-            let client_stream = match self.admin.client_sockets.get_mut(&token) {
+            let client_stream = match self.admin.client_sockets.get_mut(&token.0) {
                 Some(stream) => stream,
                 None => {
                     error!("AdminClient {:?} triggered an event, but it is no longer stored.", token);
@@ -644,15 +636,16 @@ pub fn convert_token_to_cluster_index(token_value: ClusterTokenValue) -> usize {
 }
 
 /*
-    @return bool Whether to keep the client or not.
+    Handles a ready client.
+    If an issue occurs with it, it will be removed.
 */
 fn handle_client(
     backendpools: &mut Vec<BackendPool>,
     backends: &mut Vec<Backend>,
     cluster_backends: &mut Vec<(SingleBackend, usize)>,
-    clients: &mut HashMap<usize, (Client, usize)>,
+    clients: &mut HashMap<ClientTokenValue, (Client, PoolTokenValue)>,
     token: &mut Token,
-) -> bool {
+) {
     let num_pools = backendpools.len();
     match clients.get_mut(&token.0) {
         Some((client, pool_token_value)) => {
@@ -667,13 +660,15 @@ fn handle_client(
                 Some(b) => b,
                 None => panic!("Unable to get full backends from {:?} to {:?}", start_backend_index, last_index),
             };
-            let res = handle_client_readable(client, &pool_config, *token, backends, cluster_backends);
-            return res.unwrap();
+            if handle_client_readable(client, &pool_config, *token, backends, cluster_backends) {
+                return;
+            }
         }
-        None => { error!("An event occurred for an expired client: {:?}", token); }
+        None => { debug!("An event occurred for an expired client: {:?}", token); }
     }
 
-    return false;
+    debug!("Removing client: {:?}", token);
+    clients.remove(&token.0);
 }
 
 

@@ -1,3 +1,5 @@
+use redflareproxy::ClientTokenValue;
+use redisprotocol::WriteError;
 use redflareproxy::PoolTokenValue;
 use std::net::SocketAddr;
 use hashbrown::HashMap;
@@ -131,7 +133,7 @@ impl Backend {
         message: &[u8],
         client_token: ClientToken,
         cluster_backends: &mut Vec<(SingleBackend, usize)>,
-    ) -> bool {
+    ) -> Result<(), WriteError> {
         match self.single {
             BackendEnum::Single(ref mut backend) => backend.write_message(message, client_token),
             BackendEnum::Cluster(ref mut backend) => backend.write_message(message, client_token, cluster_backends),
@@ -228,19 +230,19 @@ impl SingleBackend {
         match self.socket {
             Some(ref s) => {
                 self.token = new_token;
-                self.poll_registry.borrow_mut().reregister(s.get_ref(), new_token, Ready::readable() | Ready::writable(), PollOpt::edge());
+                try!(self.poll_registry.borrow_mut().reregister(s.get_ref(), new_token, Ready::readable() | Ready::writable(), PollOpt::edge()));
             }
             None => {}
         }
         match self.retry_timer {
             Some(ref t) => {
-                self.poll_registry.borrow_mut().reregister(t, Token(new_token.0 + self.num_backends), Ready::readable(), PollOpt::edge());
+                try!(self.poll_registry.borrow_mut().reregister(t, Token(new_token.0 + self.num_backends), Ready::readable(), PollOpt::edge()));
             }
             None => {}
         }
         match self.timer {
             Some(ref t) => {
-                self.poll_registry.borrow_mut().reregister(t, Token(new_token.0 + 2* self.num_backends), Ready::readable(), PollOpt::edge());
+                try!(self.poll_registry.borrow_mut().reregister(t, Token(new_token.0 + 2* self.num_backends), Ready::readable(), PollOpt::edge()));
             }
             None => {}
         }
@@ -287,10 +289,6 @@ impl SingleBackend {
 
     // Callback after initializing a connection.
     fn handle_connection(&mut self) {
-        //self.timer = None;
-
-        // TODO: Use a macro to encode the requests into redis protocol.
-
         let mut wait_for_resp = false;
 
         // TODO: Cache the string pushing to config initialization.
@@ -301,7 +299,11 @@ impl SingleBackend {
             request.push_str("\r\n");
             request.push_str(&self.config.auth);
             request.push_str("\r\n");
-            self.write_to_stream(NULL_TOKEN, &request.as_bytes());
+            if self.write_to_stream(NULL_TOKEN, &request.as_bytes()).is_err() {
+                change_state(&mut self.status, BackendStatus::DISCONNECTED);
+                self.socket = None;
+                return;
+            }
             self.waiting_for_auth_resp = true;
             wait_for_resp = true;
         }
@@ -313,13 +315,21 @@ impl SingleBackend {
             request.push_str("\r\n");
             request.push_str(&self.config.db.to_string());
             request.push_str("\r\n");
-            self.write_to_stream(NULL_TOKEN, &request.as_bytes());
+            if self.write_to_stream(NULL_TOKEN, &request.as_bytes()).is_err() {
+                change_state(&mut self.status, BackendStatus::DISCONNECTED);
+                self.socket = None;
+                return;
+            }
             self.waiting_for_db_resp = true;
             wait_for_resp = true;
         }
 
         if self.timeout != 0 {
-            self.write_to_stream(NULL_TOKEN, "PING\r\n".as_bytes());
+            if self.write_to_stream(NULL_TOKEN, "PING\r\n".as_bytes()).is_err() {
+                change_state(&mut self.status, BackendStatus::DISCONNECTED);
+                self.socket = None;
+                return;
+            }
             self.waiting_for_ping_resp = true;
             wait_for_resp = true;
         }
@@ -388,8 +398,7 @@ impl SingleBackend {
 
             if head.0 != NULL_TOKEN {
                 debug!("Trying to find client: {:?}", (head.0));
-                let (client, _) = clients.get_mut(&(head.0).0).unwrap();
-                write_to_client(client, b"-ERR Proxy timed out\r\n");
+                handle_write_to_client(clients, &(head.0).0, b"-ERR Proxy timed out\r\n");
             }
 
             if &target_timestamp == time {
@@ -416,10 +425,6 @@ impl SingleBackend {
     // Marks the backend as down. Returns an error message to all pending requests.
     // TODO: Is it still needed to have a mark_backend_down AND handle_backend_failure?
     pub fn mark_backend_down(&mut self, clients: &mut HashMap<usize, (Client, usize)>) {
-        if self.socket.is_some() {
-            let err = self.socket.as_mut().unwrap().get_mut().take_error();
-            debug!("Previous socket error: {:?}", err);
-        }
         change_state(&mut self.status, BackendStatus::DISCONNECTED);
 
         self.failure_count = 0;
@@ -429,8 +434,7 @@ impl SingleBackend {
             match possible_token {
                 Some((NULL_TOKEN, _)) => {}
                 Some((client_token, _)) => {
-                    let (ref mut client, _) = clients.get_mut(&client_token.0).unwrap();
-                    write_to_client(client, b"-ERR: Unavailable backend.\r\n");
+                    handle_write_to_client(clients, &client_token.0, b"-ERR: Unavailable backend.\r\n");
                 }
                 None => break,
             }
@@ -444,15 +448,16 @@ impl SingleBackend {
         &mut self,
         message: &[u8],
         client_token: Token,
-    ) -> bool {
+    ) -> Result<(), WriteError> {
+        // TODO: get rid of this wrapper function.
         match self.status {
             BackendStatus::READY => {
-                self.write_to_stream(client_token, message);
-                true
+                try!(self.write_to_stream(client_token, message));
+                return Ok(());
             }
             _ => {
                 debug!("No backend connection.");
-                false
+                return Err(WriteError::BackendNotReady);
             }
         }
     }
@@ -464,11 +469,14 @@ impl SingleBackend {
             self.handle_connection();
         }
 
+        // This can be considered DISCONNECTED already. If that's the case, disconnect should flush all responses in the queue.
+        // This does happen because when disconnecting, the socket is set to None.
+
         let mut unhandled_internal_responses = VecDeque::new();
 
         // Read all responses if there are any left.
         while self.queue.len() > 0 {
-            let a = route_backend_response(
+            let res = route_backend_response(
                 &mut self.socket,
                 clients,
                 &mut self.queue,
@@ -478,9 +486,14 @@ impl SingleBackend {
                 &mut self.waiting_for_ping_resp,
                 &mut unhandled_internal_responses,
             );
-            if a.unwrap() == false {
-                return unhandled_internal_responses;
-            };
+            match res {
+                Ok(true) => continue,
+                Ok(false) => { return unhandled_internal_responses; }
+                Err(err) => {
+                    error!("Received incompatible response from backend. Forcing a disconnect. Received error while parsing: {:?}", err);
+                    self.mark_backend_down(clients);
+                }
+            }
         }
         return unhandled_internal_responses;
     }
@@ -504,30 +517,29 @@ impl SingleBackend {
         let timestamp = now + Duration::from_millis(self.retry_timeout as u64);
         match self.retry_timer {
             Some(ref mut timer) => {
-                timer.set_timeout(Duration::new(0, (1000000 * self.retry_timeout) as u32), timestamp);
+                match timer.set_timeout(Duration::new(0, (1000000 * self.retry_timeout) as u32), timestamp) {
+                    Ok(_) => {}
+                    Err(err) => {
+                        // Expected to occur only in cases of usize integer overflow.
+                        panic!("Failure setting timer timeout: {}.", err);
+                    }
+                }
             }
-            None => { panic!("impossible"); }
+            None => { panic!("Timer does not exist after being instantiated."); }
         }
-        // need to handle with specific function for token. How to know what token this is?
-        // can stuff into sockets. but it'll ahve timer token.
-
-        //let parent_token = self.pool_token.clone();
-        debug!("Original: {:?}", self.pool_token);
-        //let timer_token = Token(self.token.0 + 1);
     }
 
     fn write_to_stream(
         &mut self,
         client_token: ClientToken,
         message: &[u8],
-    ) {
+    ) -> Result<(), WriteError> {
         debug!("Write to backend {:?} {}: {:?} {:?}", &self.token, self.host, std::str::from_utf8(&message), client_token);
         match self.socket {
-            Some(ref mut socket) => {
-                socket.get_mut().write(&message);
-            }
-            None => panic!("No connection to backend"),
+            Some(ref mut s) => try!(write_to_stream(s, message)),
+            None => return Err(WriteError::NoSocket),
         }
+        // TODO: Keep trying on self.socket if it's INTERRUPTED or WOULDBLOCK, otherwise DISCONNECT the backend connection.
         let now = Instant::now();
         let timestamp = now + Duration::from_millis(self.timeout as u64);
         self.queue.push_back((client_token, timestamp));
@@ -542,17 +554,20 @@ impl SingleBackend {
 
             match self.timer {
                 Some(ref mut timer) => {
-                    let _ = timer.set_timeout(Duration::from_millis(self.timeout as u64), timestamp);
+                    match timer.set_timeout(Duration::from_millis(self.timeout as u64), timestamp) {
+                        Ok(_) => {}
+                        Err(err) => {
+                            // Expected to occur only in cases of usize integer overflow.
+                            panic!("Failure setting timer timeout: {}.", err);
+                        }
+                    };
                     debug!("Setting timeout: {:?}", timestamp);
                 }
-                None => { panic!("impossible"); }
+                None => { panic!("Timer does not exist after being instantiated."); }
             }
         }
+        return Ok(());
     }
-}
-
-fn write_to_client(client_stream: &mut Client, message: &[u8]) {
-    let _ = client_stream.get_mut().write(message);
 }
 
 fn handle_internal_response(status: &mut BackendStatus, waiting_for_auth_resp: &mut bool, waiting_for_db_resp: &mut bool, waiting_for_ping_resp: &mut bool, response: &[u8], unhandled_queue: &mut VecDeque<String>) {
@@ -605,6 +620,11 @@ fn change_state(status: &mut BackendStatus, target_state: BackendStatus) -> bool
     return true;
 }
 
+/*
+    This should only be called if there is a request in the queue.
+    Will panic if the queue is empty.
+    Returns whether there may be more responses or not.
+*/
 fn route_backend_response(
     stream: &mut Option<BufReader<TcpStream>>,
     clients: &mut HashMap<usize, (Client, usize)>,
@@ -626,6 +646,8 @@ fn route_backend_response(
                 };
 
                 debug!("Read from backend: {:?}", std::str::from_utf8(buf));
+                // If receiving a bad protocol backend, then this is an incompatible backend.
+                // Should disconnect backend, and give error message.
                 let response = try!(extract_redis_command(buf));
                 if response.len() == 0 {
                     return Ok(false);
@@ -646,23 +668,25 @@ fn route_backend_response(
                         unhandled_internal_responses
                     );
                 } else {
-                    debug!("Client token: {:?}", client_token);
-                    match clients.get_mut(&client_token.0) {
-                        Some((stream, _)) => {
-                            debug!("Wrote to client {:?}: {:?}", client_token, std::str::from_utf8(response));
-                            let _ = stream.get_mut().write(response);
-                        }
-                        None => panic!("No client found for clienttoken {:?}", client_token),
-                    }
+                    handle_write_to_client(clients, &client_token.0, response);
                 }
                 response.len()
             };
             s.consume(len);
 
-
             return Ok(true);
         }
-        None => panic!("No backend stream!"),
+        // This case occurs if the backend is disconnected. If that's the case, then it should send error messges to clients.
+        None => {
+            let client_token = match queue.pop_front() {
+                Some((client_token, _)) => client_token,
+                None => panic!("No more client token in backend queue, even though queue length was >0 just now!"),
+            };
+            if client_token != NULL_TOKEN {
+                handle_write_to_client(clients,&client_token.0, b"ERR Backend disconnected");
+            }
+            return Ok(false);
+        }
     }
 }
 
@@ -734,3 +758,57 @@ fn create_timer() -> Timer<Instant> {
     builder.build()
 }
 
+pub fn write_to_stream(stream: &mut BufReader<TcpStream>, mut message: &[u8]) -> Result<(), WriteError> {
+    loop {
+        match stream.get_mut().write(&message) {
+            Ok(bytes_written) => {
+                if bytes_written == message.len() {
+                    return Ok(());
+                }
+                message = match message.get(bytes_written..) {
+                    Some(m) => m,
+                    None => {
+                        error!("!!!: Somehow more bytes were written than there are in the buffer. This should never happen. Please contact author.");
+                        return Err(WriteError::BufOutOfBounds);
+                    }
+                };
+                continue;
+            }
+            Err(err) => {
+                match err.kind() {
+                    std::io::ErrorKind::Interrupted => {
+                        continue;
+                    }
+                    std::io::ErrorKind::WouldBlock => {
+                        continue;
+                    }
+                    _ => {
+                        let maybe_addr = match stream.get_ref().peer_addr() {
+                            Ok(addr) => Some(addr),
+                            Err(_) => None,
+                        };
+                        return Err(WriteError::WriteFailure(maybe_addr, err));
+                    }
+                }
+            }
+        }
+    }
+}
+
+pub fn handle_write_to_client(clients: &mut HashMap<ClientTokenValue, (Client, PoolTokenValue)>, client_token_value: &ClientTokenValue, message: &[u8]) {
+    let res = {
+        let (ref mut client, _) = match clients.get_mut(client_token_value) {
+            Some(a) => a,
+            None => { return; }
+        };
+        write_to_stream(client, message)
+    };
+    match res {
+        Ok(_) => {}
+        Err(err) => {
+            debug!("Removing client: Received error: {}", err);
+            clients.remove(client_token_value);
+        }
+    }
+
+}

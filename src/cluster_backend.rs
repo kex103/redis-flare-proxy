@@ -1,3 +1,4 @@
+use redisprotocol::WriteError;
 use std::net::SocketAddr;
 use redflareproxy::PoolTokenValue;
 use redflareproxy::convert_token_to_cluster_index;
@@ -337,11 +338,12 @@ impl ClusterBackend {
         self.change_state(BackendStatus::CONNECTING);
     }
 
-    fn initialize_slotmap(&mut self, backend_token: BackendToken, cluster_backends: &mut Vec<(SingleBackend, usize)>) {
+    fn initialize_slotmap(&mut self, backend_token: BackendToken, cluster_backends: &mut Vec<(SingleBackend, usize)>) -> Result<(), WriteError> {
         let cluster_index = convert_token_to_cluster_index(backend_token.0);
         let ref mut host = cluster_backends.get_mut(cluster_index).unwrap().0;
-        host.write_message(b"*2\r\n$7\r\nCLUSTER\r\n$5\r\nSLOTS\r\n", NULL_TOKEN);
+        try!(host.write_message(b"*2\r\n$7\r\nCLUSTER\r\n$5\r\nSLOTS\r\n", NULL_TOKEN));
         self.queue.push_back(host.queue.back().unwrap().clone());
+        return Ok(());
     }
 
     pub fn handle_backend_response(
@@ -358,9 +360,10 @@ impl ClusterBackend {
         let unhandled_responses = cluster_backends.get_mut(cluster_index).unwrap().0.handle_backend_response(clients);
 
         let prev_state = self.status;
-        self.change_state(BackendStatus::LOADING);
-        if prev_state == BackendStatus::CONNECTING && self.status == BackendStatus::LOADING {
-            self.initialize_slotmap(backend_token, cluster_backends);
+        if prev_state == BackendStatus::CONNECTING {
+            if self.initialize_slotmap(backend_token, cluster_backends).is_ok() {
+                self.change_state(BackendStatus::LOADING);
+            }
         }
 
         // TODO: Handle multiple responses. Assuming it's slotsmap.
@@ -478,16 +481,13 @@ impl ClusterBackend {
         message: &[u8],
         client_token: ClientToken,
         cluster_backends: &mut Vec<(SingleBackend, usize)>,
-    ) -> bool {
+    ) -> Result<(), WriteError> {
         // get the predicted backend to write to.
         let backend_token = self.get_shard(message);
         debug!("Cluster Writing to {:?}. Source: {:?}", backend_token, client_token);
         let cluster_index = convert_token_to_cluster_index(backend_token.0);
-        let result = cluster_backends.get_mut(cluster_index).unwrap().0.write_message(message, client_token);
-        if result {
-            self.queue.push_back(cluster_backends.get(cluster_index).unwrap().0.queue.back().unwrap().clone());
-            return true;
-        }
-        false
+        try!(cluster_backends.get_mut(cluster_index).unwrap().0.write_message(message, client_token));
+        self.queue.push_back(cluster_backends.get(cluster_index).unwrap().0.queue.back().unwrap().clone());
+        return Ok(());
     }
 }

@@ -6,6 +6,39 @@ use std::time::Instant;
 #[cfg(test)]
 use cluster_backend::{init_logging, init_logging_info};
 
+
+use std::fmt;
+use std::error;
+use std::net::SocketAddr;
+
+#[derive(Debug)]
+pub enum WriteError {
+    NoSocket,
+    BufOutOfBounds,
+    BackendNotReady,
+    WriteFailure(Option<SocketAddr>, std::io::Error),
+}
+impl fmt::Display for WriteError {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        match self {
+            WriteError::NoSocket => write!(f, "No TcpStream for this backend"),
+            WriteError::BufOutOfBounds => write!(f, "This should be impossible. Somehow send wrote more bytes than the buffer size"),
+            WriteError::BackendNotReady => write!(f, "Backend is not available."),
+            WriteError::WriteFailure(ref s, ref e) => write!(f, "Failed to write to stream: {:?}. Received error: {}.", s, e),
+        }
+    }
+}
+impl error::Error for WriteError {
+    fn source(&self) -> Option<&(dyn error::Error + 'static)> {
+        match self {
+            WriteError::NoSocket => None,
+            WriteError::BufOutOfBounds => None,
+            WriteError::BackendNotReady => None,
+            WriteError::WriteFailure(_, ref e) => Some(e),
+        }
+    }
+}
+
 #[derive(Debug, PartialEq)]
 pub enum RedisError {
     NoBackend,

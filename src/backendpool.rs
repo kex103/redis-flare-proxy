@@ -1,3 +1,4 @@
+use backend::write_to_stream;
 use redflareproxy::PoolTokenValue;
 use redflareproxy::ClientTokenValue;
 use backend::SingleBackend;
@@ -15,7 +16,7 @@ use redisprotocol::{extract_key, RedisError};
 use mio::*;
 use mio::tcp::{TcpListener};
 use std::string::String;
-use std::io::{Write, BufRead};
+use std::io::{BufRead};
 use hashbrown::HashMap;
 use conhash::*;
 use conhash::Node;
@@ -192,7 +193,7 @@ pub fn shard<'a>(
         }
         Err(error) => debug!("Received {:?} while sharding!", error),
     }
-    Err(RedisError::Unknown)
+    Err(RedisError::NoBackend)
 }
 
 #[cfg(test)]
@@ -262,7 +263,7 @@ pub fn handle_client_readable(
     client_token: ClientToken,
     backends: &mut [Backend],
     cluster_backends: &mut Vec<(SingleBackend, usize)>,
-) -> Result<bool, RedisError> {
+) -> bool {
     debug!("Handling client: {:?}", &client_token);
 
     // 1. Pull command from client.
@@ -278,7 +279,15 @@ pub fn handle_client_readable(
             }
             else {
                 debug!("Read from client:\n{:?}", std::str::from_utf8(buf));
-                let client_request = try!(extract_redis_command(buf));
+                let mut err_resp: Option<&[u8]> = None;
+                let client_request = match extract_redis_command(buf) {
+                    Ok(r) => r,
+                    Err(err) => {
+                        debug!("Invalid redis protocol: {:?}", err);
+                        err_resp = Some(b"-ERROR: Invalid redis protocol[");
+                        b""
+                    }
+                };
                 debug!("Extracted from client:\n{:?}", std::str::from_utf8(&client_request));
 
 
@@ -286,12 +295,15 @@ pub fn handle_client_readable(
                 // Perhaps the API should be.. write_backend(message_string, token)
                 // A cluster needs... access to all possible connections.. ?
                 // Or it has its own.
-                let mut err_resp: Option<&[u8]> = None;
                 match shard(pool_config, backends, &client_request) {
                     Ok(backend) => {
-                        if !backend.write_message(&client_request, client_token, cluster_backends) {
-                            err_resp = Some(b"-ERROR: Not connected\r\n");
-                        }
+                        match backend.write_message(&client_request, client_token, cluster_backends) {
+                            Ok(_) => {}
+                            Err(err) => {
+                                debug!("Backend could not be written to. Received error: {}", err);
+                                err_resp = Some(b"-ERROR: Not connected\r\n");
+                            }
+                        };
                     }
                     Err(RedisError::NoBackend) => {
                         err_resp = Some(b"-ERROR: No backend\r\n");
@@ -304,6 +316,7 @@ pub fn handle_client_readable(
                     }
                     Err(_reason) => {
                         debug!("Failed to shard: reason: {:?}", _reason);
+                        err_resp = Some(b"-ERROR: Unknown proxy error");
                     }
                 }
                 (client_request.len(), err_resp)
@@ -313,11 +326,15 @@ pub fn handle_client_readable(
 
 
         match err_resp {
+            None => {}
             Some(resp) => {
                 debug!("Wrote to client error: {:?}: {:?}", client_token, std::str::from_utf8(resp));
-                client_stream.get_mut().write(resp);
-            }
-            None => {
+                // Should check the written usize, and should retry if it's not all written.
+                // Also, with an error, ErrorKind::Interrupted, the error is non-fatal, and the write attempt can be re-attempted.
+                // Twemproxy tries forever if interrupted is received, or wouldblock, or EAGAIN
+                if write_to_stream(client_stream, resp).is_err() {
+                    return false;
+                }
             }
         }
         debug!("All done handling client! {:?}", buf_len);
@@ -325,7 +342,7 @@ pub fn handle_client_readable(
 
     };
     if buf_len == 0 {
-        return Ok(false);
+        return false;
     }
-    return Ok(true);
+    return true;
 }
