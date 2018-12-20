@@ -247,7 +247,6 @@ impl SingleBackend {
             }
             None => {}
         }
-        // TODO: bubble up error.
         return Ok(());
     }
 

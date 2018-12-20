@@ -132,7 +132,6 @@ impl BackendPool {
 }
 
 // Based on the given command, determine which Backend to use, if any.
-// We support Ketama, Modula, and Random.
 pub fn shard<'a>(
     config: &BackendPoolConfig,
     backends: &'a mut [Backend],
@@ -159,8 +158,21 @@ pub fn shard<'a>(
             // TODO: Check if there's any discrepancy between this key and twemproxy.
             i += 1;
         }
-        let hashed_index = consistent_hash.get(tag).unwrap().index;
-        return Ok(backends.get_mut(hashed_index).unwrap());
+        let hashed_index = match consistent_hash.get(tag) {
+            Some(n) => n.index,
+            None => {
+                return Err(RedisError::NoBackend);
+            }
+        };
+        match backends.get_mut(hashed_index) {
+            Some(b) => {
+                return Ok(b);
+            }
+            None => {
+                error!("Consistent hashing hashed to a nonexistent backend! Index: {}. This should never happen. Please contact author.", hashed_index);
+                return Err(RedisError::NoBackend);
+            }
+        }
     }
 
     // Get total size:
@@ -197,7 +209,7 @@ pub fn shard<'a>(
 }
 
 #[cfg(test)]
-use cluster_backend::init_logging;
+use init_logging;
 #[test]
 fn test_hashtag() {
     init_logging();

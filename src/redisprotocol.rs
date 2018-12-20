@@ -47,6 +47,7 @@ pub enum RedisError {
     UnsupportedCommand,
     InvalidScript,
     InvalidProtocol,
+    UnparseableHost,
 }
 
 enum KeyPosition {
@@ -846,7 +847,7 @@ fn str17compare(byte: &[u8], c1: char, c2: char, c3: char, c4: char, c5: char, c
 
 pub fn handle_slotsmap(
     response: &[u8],
-    handle_slots: &mut FnMut(String, usize, usize)
+    handle_slots: &mut FnMut(String, usize, usize) -> Result<(), RedisError>,
 ) -> Result<(), RedisError> {
     if response.len() == 0 {
         return Ok(());
@@ -967,7 +968,7 @@ pub fn handle_slotsmap(
 
             // TODO. only do this for first one.
             let host = format!("{}:{}", hostname, port);
-            handle_slots(host, starting_slot as usize, ending_slot as usize);
+            try!(handle_slots(host, starting_slot as usize, ending_slot as usize));
         }
     }
     return Ok(());
@@ -996,11 +997,12 @@ fn test_slotsmap() {
     let r = "*3\r\n*3\r\n:10922\r\n:16382\r\n*2\r\n$9\r\n127.0.0.1\r\n:7002\r\n*3\r\n:1\r\n:5460\r\n*2\r\n$9\r\n127.0.0.1\r\n:7000\r\n*3\r\n:5461\r\n:10921\r\n*2\r\n$9\r\n127.0.0.1\r\n:7001\r\n";
     let mut assigned_slots : Vec<Host>  = vec!["".to_owned(); 16384];
     {
-    let mut count_slots = |host:String, start: usize, end: usize| {
+    let mut count_slots = |host:String, start: usize, end: usize| -> Result<(), RedisError> {
         for i in start..end+1 {
             assigned_slots.remove(i-1);
             assigned_slots.insert(i-1, host.clone());
         }
+        return Ok(());
     };
     handle_slotsmap(r.as_bytes(), &mut count_slots).unwrap();
     }
@@ -1017,11 +1019,12 @@ fn test_slotsmap() {
     let r = "*3\r\n*3\r\n:10922\r\n:16382\r\n*3\r\n$9\r\n127.0.0.1\r\n:7002\r\n$40\r\nd0380b35d40bd7f271accef4a3e51d9514c9c645\r\n*3\r\n:1\r\n:5460\r\n*3\r\n$9\r\n127.0.0.1\r\n:7000\r\n$40\r\nef87505cb77d00e9f7886cfecc81413418e95bfd\r\n*3\r\n:5461\r\n:10921\r\n*3\r\n$9\r\n127.0.0.1\r\n:7001\r\n$40\r\nb6caef27795d29d068989e38fec89bc92158930d\r\n";
         let mut assigned_slots : Vec<Host>  = vec!["".to_owned(); 16384];
     {
-    let mut count_slots = |host:String, start: usize, end: usize| {
+    let mut count_slots = |host:String, start: usize, end: usize| -> Result<(), RedisError> {
         for i in start..end+1 {
             assigned_slots.remove(i-1);
             assigned_slots.insert(i-1, host.clone());
         }
+        return Ok(());
     };
     handle_slotsmap(r.as_bytes(), &mut count_slots).unwrap();
     }
