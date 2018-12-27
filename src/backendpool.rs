@@ -27,7 +27,7 @@ use rand::Rng;
 use std::cell::RefCell;
 use std::rc::Rc;
 
-use std::io::BufReader;
+use bufreader::BufReader;
 
 #[derive(Clone)]
 struct IndexNode {
@@ -225,7 +225,10 @@ fn get_tag<'a>(key: &'a [u8], tags: &String) -> &'a [u8] {
         return key;
     }
     let ref mut chars = tags.chars();
-    let a = chars.next().unwrap();
+    let a = match chars.next() {
+        Some(a) => a,
+        None => { panic!("Shouldn't be possible to hit, get_tag"); }
+    };
     let b = match chars.next() {
         Some(b) => b,
         None => a
@@ -239,7 +242,10 @@ fn get_tag<'a>(key: &'a [u8], tags: &String) -> &'a [u8] {
             beginning = index + 1;
         }
         else if parsing_tag && cha == b as u8 {
-            return key.get(beginning..index).unwrap();
+            return match key.get(beginning..index) {
+                Some(res) => res,
+                None => { panic!("Shouldn't be possible to hit, get_tag exceeded bounds"); }
+            };
         }
         index += 1;
     }

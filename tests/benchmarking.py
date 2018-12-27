@@ -99,6 +99,42 @@ class BenchmarkProxy(TestUtil):
         self.start_proxy(TestUtil.script_dir() + "/conf/timeout1.toml")
         self.run_redis_benchmark(1531)
 
+    def test_benchmark_cluster(self):
+        self.start_redis_cluster_server(7000)
+        self.start_redis_cluster_server(7001)
+        self.start_redis_cluster_server(7002)
+        self.initialize_redis_cluster([7000, 7001, 7002])
+        self.start_proxy(TestUtil.script_dir() + "/conf/cluster1.toml")
+        self.run_redis_benchmark(1533)
+
+    def test_benchmark_ten_backends(self):
+        self.start_redis_server(6380)
+        self.start_redis_server(6381)
+        self.start_redis_server(6382)
+        self.start_redis_server(6383)
+        self.start_redis_server(6384)
+        self.start_redis_server(6385)
+        self.start_redis_server(6386)
+        self.start_redis_server(6387)
+        self.start_redis_server(6388)
+        self.start_redis_server(6389)
+        self.start_proxy(TestUtil.script_dir() + "/conf/timeout2.toml")
+        self.run_redis_benchmark(1531)
+
+    def test_benchmark_nutcracker_ten_backends(self):
+        self.start_redis_server(6380)
+        self.start_redis_server(6381)
+        self.start_redis_server(6382)
+        self.start_redis_server(6383)
+        self.start_redis_server(6384)
+        self.start_redis_server(6385)
+        self.start_redis_server(6386)
+        self.start_redis_server(6387)
+        self.start_redis_server(6388)
+        self.start_redis_server(6389)
+        self.start_nutcracker(TestUtil.script_dir() + "/conf/timeout2.yaml")
+        self.run_redis_benchmark(1531)
+
     def test_benchmark_single_backend_with_profiling(self):
         #proc = self.start_benchmarker(1531, 6380)
 

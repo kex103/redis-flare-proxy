@@ -5,7 +5,7 @@ use backend::SingleBackend;
 use backendpool::handle_timeout;
 use backendpool::handle_client_readable;
 use config::BackendConfig;
-use std::io::BufReader;
+use bufreader::BufReader;
 use mio::net::TcpStream;
 use backend::Backend;
 use admin;

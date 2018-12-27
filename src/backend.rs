@@ -6,7 +6,7 @@ use hashbrown::HashMap;
 use redflareproxy::ClientToken;
 use redflareproxy::BackendToken;
 use redflareproxy::Client;
-use std::io::BufReader;
+use bufreader::BufReader;
 use redflareproxy::{NULL_TOKEN};
 use config::BackendConfig;
 use mio::*;
@@ -501,7 +501,7 @@ impl SingleBackend {
                 Ok(true) => continue,
                 Ok(false) => { return unhandled_internal_responses; }
                 Err(err) => {
-                    error!("Received incompatible response from backend. Forcing a disconnect. Received error while parsing: {:?}", err);
+                    error!("Received incompatible response from backend. Forcing a disconnect. Received error while parsing: {}", err);
                     self.mark_backend_down(clients);
                 }
             }
@@ -666,39 +666,74 @@ fn route_backend_response(
     match stream {
         Some(ref mut s) => {
             let len = {
-                let buf = match s.fill_buf() {
-                    Ok(b) => b,
-                    Err(_err) => {
+                let mut read_attempts = 3;
+                loop {
+                    let buf = if read_attempts == 3 {
+                        match s.fill_buf() {
+                            Ok(b) => b,
+                            Err(_err) => {
+                                return Ok(false);
+                            }
+                        }
+                    } else {
+                        s.reset_buf();
+                        match s.append_buf() {
+                            Ok(b) => b,
+                            Err(_err) => { return Ok(false); }
+                        }
+                    };
+
+                    debug!("Read from backend: {:?}", std::str::from_utf8(buf));
+                    //let buf = s.append_buf().unwrap();
+                    //error!("Read from backend again: {:?}", std::str::from_utf8(buf));
+
+                    // If receiving a bad protocol backend, then this is an incompatible backend.
+                    // Should disconnect backend, and give error message.
+                    let response = match extract_redis_command(buf) {
+                        Ok(r) => r,
+                        Err(RedisError::IncompleteMessage) => {
+                            error!("Incomplete message. trying again.");
+                            read_attempts -= 1;
+                            if read_attempts == 0 {
+                                buf
+                            } else {
+                                continue;
+                            }
+                        }
+                        Err(RedisError::Unknown(a)) => {
+                            error!("Received unknown: {}, {:?}", RedisError::Unknown(a), std::str::from_utf8(buf));
+                            read_attempts -= 1;
+                            if read_attempts == 0 {
+                                buf
+                            } else {
+                                continue;
+                            }
+                        }
+                        Err(err) => { return Err(err); }
+                    };
+                    if response.len() == 0 {
                         return Ok(false);
                     }
-                };
 
-                debug!("Read from backend: {:?}", std::str::from_utf8(buf));
-                // If receiving a bad protocol backend, then this is an incompatible backend.
-                // Should disconnect backend, and give error message.
-                let response = try!(extract_redis_command(buf));
-                if response.len() == 0 {
-                    return Ok(false);
+                    let client_token = match queue.pop_front() {
+                        Some((client_token, _)) => client_token,
+                        None => panic!("No more client token in backend queue, even though queue length was >0 just now!"),
+                    };
+
+                    if client_token == NULL_TOKEN {
+                        handle_internal_response(
+                            status,
+                            waiting_for_auth_resp,
+                            waiting_for_db_resp,
+                            waiting_for_ping_resp,
+                            response,
+                            unhandled_internal_responses
+                        );
+                    } else {
+                        handle_write_to_client(clients, &client_token.0, response);
+                    }
+                    break response.len()
                 }
-
-                let client_token = match queue.pop_front() {
-                    Some((client_token, _)) => client_token,
-                    None => panic!("No more client token in backend queue, even though queue length was >0 just now!"),
-                };
-
-                if client_token == NULL_TOKEN {
-                    handle_internal_response(
-                        status,
-                        waiting_for_auth_resp,
-                        waiting_for_db_resp,
-                        waiting_for_ping_resp,
-                        response,
-                        unhandled_internal_responses
-                    );
-                } else {
-                    handle_write_to_client(clients, &client_token.0, response);
-                }
-                response.len()
             };
             s.consume(len);
 
@@ -838,5 +873,4 @@ pub fn handle_write_to_client(clients: &mut HashMap<ClientTokenValue, (Client, P
             clients.remove(client_token_value);
         }
     }
-
 }

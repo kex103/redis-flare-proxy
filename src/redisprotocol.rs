@@ -43,11 +43,25 @@ impl error::Error for WriteError {
 #[derive(Debug, PartialEq)]
 pub enum RedisError {
     NoBackend,
-    Unknown,
+    Unknown(Vec<u8>),
     UnsupportedCommand,
     InvalidScript,
     InvalidProtocol,
     UnparseableHost,
+    IncompleteMessage,
+}
+impl fmt::Display for RedisError {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        match self {
+            RedisError::Unknown(v) => {
+                match std::str::from_utf8(v) {
+                    Ok(s) => write!(f, "RedisError::Unknown {}", s),
+                    Err(_err) => write!(f, "RedisError::Unknown {:?}", v),
+                }
+            }
+            err => write!(f, "{}:?", err),
+        }
+    }
 }
 
 enum KeyPosition {
@@ -83,13 +97,14 @@ fn test_parsing_speed() {
 }
 
 fn skip_past_eol(bytes: &[u8], index: &mut usize) -> Result<(), RedisError> {
-    match memchr('\n' as u8, bytes) {
+    let bytes2 = unsafe { bytes.get_unchecked(*index..) };
+    match memchr('\n' as u8, bytes2) {
         Some(delta) => {
             *index += delta + 1;
             return Ok(());
         }
         None => {
-            return Err(RedisError::Unknown);
+            return Err(RedisError::Unknown(bytes.to_vec()));
         }
     }
 }
@@ -152,28 +167,11 @@ fn test_extract_redis_command() {
     let a = "*3\r\n+dera\r\n$2\r\nab\r\n*2\r\n$4\r\nBLAR\r\n:34\r\nadaerare".to_string();
     let resp = extract_redis_command(&a.as_bytes());
     assert_eq!(resp, Ok("*3\r\n+dera\r\n$2\r\nab\r\n*2\r\n$4\r\nBLAR\r\n:34\r\n".as_bytes()));
+
+    let a = "*3\r\n*3\r\n:10922\r\n:14624\r\n*3\r\n$9\r\n127.0.0.1\r\n:7002\r\n$40\r\ncb0a0a8d38708ce6369a969854e6076e3b3133f5\r\n".to_string();
+    let resp = extract_redis_command(&a.as_bytes());
+    assert_eq!(resp, Ok("*3\r\n*3\r\n:10922\r\n:14624\r\n*3\r\n$9\r\n127.0.0.1\r\n:7002\r\n$40\r\ncb0a0a8d38708ce6369a969854e6076e3b3133f5\r\n".as_bytes()));
 }
-
-#[test]
-fn test_extract_redis_command_speed() {
-    let num_runs = 10000000;
-    init_logging_info();
-    let a = "$4\r\nTHRE\r\ndera".to_string();
-    let b = a.as_bytes();
-
-    let start = Instant::now();
-    for _ in 1..num_runs {
-        let _ = extract_redis_command(b);
-    }
-    info!("Time spent with extract_redis_command: {:?}", Instant::now() - start);
-
-    let start = Instant::now();
-    for _ in 1..num_runs {
-        let _ = extract_redis_command(b);
-    }
-    info!("Time spent with extract_redis_command: {:?}", Instant::now() - start);
-}
-
 
 pub fn extract_redis_command(bytes: &[u8]) -> Result<&[u8], RedisError> {
     let mut index = 0;
@@ -185,23 +183,24 @@ pub fn extract_redis_command(bytes: &[u8]) -> Result<&[u8], RedisError> {
     Iterates through one redis request in bytes, moving the index to the end of the request.
 */
 fn parse_redis_request(bytes: &[u8], index: &mut usize) -> Result<(), RedisError> {
-    match *bytes.get(*index).unwrap() as char {
+    let next_char = match bytes.get(*index) {
+        Some(c) => *c as char,
+        None => { return Err(RedisError::IncompleteMessage); }
+    };
+    match next_char {
         '+' =>  {
             *index += 1;
-            let bytes2 = unsafe { bytes.get_unchecked(*index..) };
-            try!(skip_past_eol(bytes2, index));
+            try!(skip_past_eol(bytes, index));
             return Ok(());
         }
         '-' =>  {
             *index += 1;
-            let bytes2 = unsafe { bytes.get_unchecked(*index..) };
-            try!(skip_past_eol(bytes2, index));
+            try!(skip_past_eol(bytes, index));
             return Ok(());
         }
         ':' =>  {
             *index += 1;
-            let bytes2 = unsafe { bytes.get_unchecked(*index..) };
-            try!(skip_past_eol(bytes2, index));
+            try!(skip_past_eol(bytes, index));
             return Ok(());
         }
         '$' => {

@@ -37,6 +37,7 @@ mod backendpool;
 mod redisprotocol;
 mod hash;
 
+mod bufreader;
 
 #[cfg(test)]
 pub fn init_logging() {

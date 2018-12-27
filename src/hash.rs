@@ -79,7 +79,7 @@ impl Hasher for FnvHasher {
 #[cfg(test)]
 use std::time::Instant;
 #[cfg(test)]
-use cluster_backend::init_logging;
+use init_logging;
 
 
 #[test]

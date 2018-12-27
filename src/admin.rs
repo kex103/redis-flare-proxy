@@ -6,7 +6,7 @@ use redflareproxy::{ClientToken};
 use config::{AdminConfig};
 
 use mio::*;
-use std::io::BufReader;
+use bufreader::BufReader;
 use mio::tcp::{TcpListener};
 use hashbrown::HashMap;
 
