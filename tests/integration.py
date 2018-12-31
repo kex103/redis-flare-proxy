@@ -42,23 +42,23 @@ class TestRedFlareProxy(TestUtil):
 
         TestUtil.verify_redis_connection(1533)
 
-        TestUtil.populate_redis_key(6381, "key1")
+        TestUtil.populate_redis_key(6384, "key1")
         self.assert_redis_key(1533, "key1")
-        TestUtil.populate_redis_key(6382, "key2")
+        TestUtil.populate_redis_key(6383, "key2")
         self.assert_redis_key(1533, "key2")
 
     def test_multiple_backend_with_timeout(self):
         # TODO: Set delay at 1 at first, then verify timeout when delay set to 101.
         self.start_redis_server(6381)
+        self.start_redis_server(6382)
         self.start_redis_server(6380)
-        self.start_redis_server(6383)
         self.start_redis_server(6384)
-        self.start_delayer(6382, 6380, 110)
+        self.start_delayer(6383, 6380, 110)
         self.start_proxy("tests/conf/multishard2.toml")
 
         TestUtil.verify_redis_connection(1533)
 
-        TestUtil.populate_redis_key(6384, "key1")
+        TestUtil.populate_redis_key(6381, "key1")
         TestUtil.verify_redis_error(1533, "ERROR: Not connected")
 
     def test_hashtags(self):
@@ -71,33 +71,33 @@ class TestRedFlareProxy(TestUtil):
         TestUtil.verify_redis_connection(1533)
 
         TestUtil.populate_redis_key(1533, "key1")
-        self.assert_redis_key(6381, "key1")
+        self.assert_redis_key(6384, "key1")
         TestUtil.populate_redis_key(1533, "key4")
-        self.assert_redis_key(6384, "key4")
+        self.assert_redis_key(6381, "key4")
 
         # Verify single hashtag doesn't work.
         TestUtil.populate_redis_key(1533, "/key4")
-        self.assert_redis_key(6381, "/key4")
+        self.assert_redis_key(6384, "/key4")
         TestUtil.populate_redis_key(1533, "key/4")
-        self.assert_redis_key(6381, "key/4")
+        self.assert_redis_key(6384, "key/4")
         TestUtil.populate_redis_key(1533, "key4/")
-        self.assert_redis_key(6383, "key4/")
+        self.assert_redis_key(6382, "key4/")
 
         # Verify that // corresponds to the same hash.
         TestUtil.populate_redis_key(1533, "key4//")
-        self.assert_redis_key(6383, "key4//")
+        self.assert_redis_key(6382, "key4//")
         TestUtil.populate_redis_key(1533, "key4///")
-        self.assert_redis_key(6383, "key4///")
+        self.assert_redis_key(6382, "key4///")
         TestUtil.populate_redis_key(1533, "//key4", "teste")
-        self.assert_redis_key(6383, "//key4", "teste")
+        self.assert_redis_key(6382, "//key4", "teste")
 
         # Verify that /4/ corresponds to the same hash.
         TestUtil.populate_redis_key(1533, "4", "/value534")
-        self.assert_redis_key(6381, "4", "/value534")
+        self.assert_redis_key(6384, "4", "/value534")
         TestUtil.populate_redis_key(1533, "key/4/", "/value5")
-        self.assert_redis_key(6381, "key/4/", "/value5")
+        self.assert_redis_key(6384, "key/4/", "/value5")
         TestUtil.populate_redis_key(1533, "adaerr/4/", "/value2")
-        self.assert_redis_key(6381, "adaerr/4/", "/value2")
+        self.assert_redis_key(6384, "adaerr/4/", "/value2")
 
         # TODO: Verify hashtag pairs.
 
@@ -156,6 +156,7 @@ class TestRedFlareProxy(TestUtil):
         r1 = redis.Redis(port=6380)
         r2 = redis.Redis(port=6380, db=1)
         r3 = redis.Redis(port=6380, db=2)
+        r4 = redis.Redis(port=6382)
 
         # 1. Verify that db is selected properly.
         self.start_proxy("tests/conf/db1.toml")
@@ -169,9 +170,11 @@ class TestRedFlareProxy(TestUtil):
         response = r1.execute_command("DBSIZE")
         self.assertEquals(response, 0)
         response = r2.execute_command("DBSIZE")
-        self.assertEquals(response, 3)
+        self.assertEquals(response, 2)
         response = r3.execute_command("DBSIZE")
         self.assertEquals(response, 0)
+        response = r4.execute_command("DBSIZE")
+        self.assertEquals(response, 3)
 
         TestUtil.flush_keys(ports)
 
@@ -193,14 +196,16 @@ class TestRedFlareProxy(TestUtil):
         response = r2.execute_command("DBSIZE")
         self.assertEquals(response, 0)
         response = r3.execute_command("DBSIZE")
+        self.assertEquals(response, 2)
+        response = r4.execute_command("DBSIZE")
         self.assertEquals(response, 3)
 
         TestUtil.flush_keys(ports)
 
         # 3. Verify that disconnecting and reconnecting results in same db being used.
         delayer.sendall("SETDELAY 400")
-        TestUtil.verify_redis_error(1531, "Proxy timed out", key="key1")
-        TestUtil.verify_redis_error(1531, "ERROR: Not connected", key="key1")
+        TestUtil.verify_redis_error(1531, "Proxy timed out", key="key2")
+        TestUtil.verify_redis_error(1531, "ERROR: Not connected", key="key2")
         delayer.sendall("SETDELAY 0")
         time.sleep(2)
 
@@ -215,6 +220,8 @@ class TestRedFlareProxy(TestUtil):
         response = r2.execute_command("DBSIZE")
         self.assertEquals(response, 0)
         response = r3.execute_command("DBSIZE")
+        self.assertEquals(response, 2)
+        response = r4.execute_command("DBSIZE")
         self.assertEquals(response, 3)
 
     def test_client_reclamation(self):

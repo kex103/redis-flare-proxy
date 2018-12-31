@@ -28,6 +28,9 @@ fn default_distribution() -> Distribution {
 fn default_hash_function() -> HashFunction {
     return HashFunction::Fnv1a64;
 }
+fn default_warm_sockets() -> bool {
+    return true;
+}
 
 #[derive(Deserialize, Clone, Serialize, Eq, PartialEq, Hash)]
 pub struct BackendPoolConfig {
@@ -55,6 +58,9 @@ pub struct BackendPoolConfig {
 
     #[serde(default)]
     pub hash_tag: String,
+
+    #[serde(default = "default_warm_sockets")]
+    pub warm_sockets: bool,
 }
 #[derive(Deserialize, Clone, Serialize, Eq, PartialEq, Hash)]
 pub struct BackendConfig {

@@ -34,6 +34,8 @@ pub struct ClusterBackend {
     retry_timeout: usize,
     poll_registry: Rc<RefCell<Poll>>,
     num_backends: usize,
+    waiting_for_slotsmap_resp: bool,
+    cached_backend_shards: Rc<RefCell<Option<Vec<usize>>>>,
 }
 impl ClusterBackend {
     pub fn new(
@@ -47,6 +49,7 @@ impl ClusterBackend {
         retry_timeout: usize,
         pool_token: usize,
         num_backends: usize,
+        cached_backend_shards: &Rc<RefCell<Option<Vec<usize>>>>,
     ) -> (ClusterBackend, Vec<BackendToken>) {
         let mut cluster = ClusterBackend {
             hostnames: HashMap::new(),
@@ -61,6 +64,8 @@ impl ClusterBackend {
             retry_timeout: retry_timeout,
             poll_registry: Rc::clone(poll_registry),
             num_backends: num_backends,
+            waiting_for_slotsmap_resp: false,
+            cached_backend_shards: Rc::clone(cached_backend_shards),
         };
         for _ in 0..cluster.slots.capacity() {
             cluster.slots.push("".to_owned());
@@ -81,6 +86,7 @@ impl ClusterBackend {
                 retry_timeout,
                 pool_token,
                 num_backends,
+                &cluster.cached_backend_shards,
             );
             cluster_backends.push((single, token.0));
             cluster.hostnames.insert(host.to_string(), backend_token);
@@ -89,24 +95,6 @@ impl ClusterBackend {
         }
         debug!("Initializing cluster");
         (cluster, all_backend_tokens)
-    }
-
-    fn initialize_host(&mut self, host: SocketAddr, next_cluster_token_value: &mut usize, cluster_backends: &mut Vec<(SingleBackend, usize)>) {
-        let backend_token = Token(*next_cluster_token_value);
-        *next_cluster_token_value += 1;
-            let (single, _) = SingleBackend::new(
-                self.config.clone(),
-                host,
-                backend_token,
-                &self.poll_registry,
-                self.timeout,
-                self.failure_limit,
-                self.retry_timeout,
-                self.pool_token,
-                self.num_backends,
-            );
-        cluster_backends.push((single, self.token.0));
-        self.hostnames.insert(host.to_string(), backend_token.clone());
     }
 
     pub fn reregister_token(&mut self, new_token: BackendToken, cluster_backends: &mut Vec<(SingleBackend, usize)>, new_num_backends: usize) -> Result<(), std::io::Error> {
@@ -161,80 +149,35 @@ impl ClusterBackend {
         cluster_backends: &mut Vec<(SingleBackend, usize)>,
     ) {
         let cluster_index = convert_token_to_cluster_index(backend_token.0);
-        let unhandled_responses = match cluster_backends.get_mut(cluster_index) {
-            Some((backend, _)) => backend.handle_backend_response(clients),
-            None => {
-                panic!("ClusterBackend is referencing a Backend that does not exist! Occurred when handling backend response.");
-            }
-        };
+        let mut additional_cluster_backends = Vec::new();
+        let mut failed_slotsmap = false;
 
-        // This should only fire once for the cluster.
-        if self.status == BackendStatus::CONNECTING {
-            if initialize_slotmap(&mut self.queue, backend_token, cluster_backends).is_ok() {
-                change_state(&mut self.status, BackendStatus::LOADING);
-            }
+        // Accumulate all potential new cluster backends.
+        {
+            let mut resp_handler = |response: &[u8]| -> () {
+                handle_unhandled_response(self, response, next_cluster_token_value, &mut additional_cluster_backends, &mut failed_slotsmap);
+            };
+            match cluster_backends.get_mut(cluster_index) {
+                Some((backend, _)) => backend.handle_backend_response(clients, &mut resp_handler),
+                None => {
+                    panic!("ClusterBackend is referencing a Backend that does not exist! Occurred when handling backend response.");
+                }
+            };
         }
 
-        let mut initialized_slotsmap = false;
-        // TODO: Handle multiple responses. Assuming it's slotsmap.
-        for response in unhandled_responses {
-            {
-                {
-                    let mut register_backend = |host:String, start: usize, end: usize| -> Result<(), RedisError> {
-                        debug!("Backend slots map registered! {} From {} to {}", host, start, end);
+        // Append new cluster backends to the permanent cluster backend collection.
+        for (ref mut backend, _) in additional_cluster_backends.iter_mut() {
+            backend.init_connection();
+        }
+        cluster_backends.append(&mut additional_cluster_backends);
 
-                        for i in start..end+1 {
-                            self.slots.remove(i);
-                            self.slots.insert(i, host.clone());
-                        }
-
-                        if !self.hostnames.contains_key(&host) {
-                            let addr = match host.parse() {
-                                Ok(a) => a,
-                                Err(err) => {
-                                    error!("Unable to parse host: {}. Received error: {}", host, err);
-                                    return Err(RedisError::UnparseableHost);
-                                }
-                            };
-                            self.initialize_host(addr, next_cluster_token_value, cluster_backends);
-                            let backend_token = match self.hostnames.get(&host) {
-                                Some(b) => b,
-                                None => {
-                                    // Never expected to occur.
-                                    panic!("Unable to find backend token for cluster after it got intialized.");
-                                }
-                            };
-                            let cluster_index = convert_token_to_cluster_index(backend_token.0);
-                            match cluster_backends.get_mut(cluster_index) {
-                                Some((backend, _)) => backend.init_connection(),
-                                None => {
-                                    panic!("ClusterBackend is referencing a Backend that does not exist! Occurred during handling slotsmap.");
-                                }
-                            };
-                        }
-                        return Ok(());
-                    };
-                    match handle_slotsmap(&response, &mut register_backend) {
-                        Ok(_) => {
-                            initialized_slotsmap = true;
-                            continue;
-                        }
-                        Err(err) => {
-                            error!("Failed to parse slotsmap response. Received error: {:?}", err);
-                        }
-                    }
-                }
-
-                // Bad slotsmap response. Mark the cluster backend as down, and should mark self as CONNECTING against.
-                // In addition, we need to send another initiale_slotsmap request. Perhaps it's simplest to retry everything?
-                cluster_backends.get_mut(cluster_index).unwrap().0.disconnect();
-            }
-
-            // Change status from LOADING to READY. This 
-            if initialized_slotsmap {
+        // Handle status changes.
+        if self.status == BackendStatus::LOADING {
+            if self.waiting_for_slotsmap_resp == false {
                 change_state(&mut self.status, BackendStatus::READY);
-            } else {
-                // Send another initialize_slotsmap.
+                *self.cached_backend_shards.borrow_mut() = None;
+            } else if failed_slotsmap {
+                // Resend slotsmap request if previous request failed.
                 for (_, b_token) in self.hostnames.iter() {
                     let cluster_index = convert_token_to_cluster_index(b_token.0);
                     let available = {
@@ -244,15 +187,23 @@ impl ClusterBackend {
                     if available {
                         if initialize_slotmap(&mut self.queue, *b_token, cluster_backends).is_ok() {
                             change_state(&mut self.status, BackendStatus::LOADING);
-                            break;
+                            return;
                         }
                     }
                 }
-                // If none available, just wait, just set to CONNECTING>
-                // But want to check that there are backends that are connecting.
+                // If none available, just wait, just set to CONNECTING.
+                // TODO: Verify that there are backends that are actually connecting.
                 change_state(&mut self.status, BackendStatus::CONNECTING);
+                return;
             }
-            return;
+        }
+
+        // This should only fire once for the cluster.
+        if self.status == BackendStatus::CONNECTING {
+            if initialize_slotmap(&mut self.queue, backend_token, cluster_backends).is_ok() {
+                self.waiting_for_slotsmap_resp = true;
+                change_state(&mut self.status, BackendStatus::LOADING);
+            }
         }
     }
 
@@ -367,4 +318,99 @@ fn change_state(status: &mut BackendStatus, target_state: BackendStatus) -> bool
     debug!("ClusterBackend changed state from {:?} to {:?}", status, target_state);
     *status = target_state;
     return true;
+}
+
+fn handle_unhandled_response(
+    cluster: &mut ClusterBackend,
+    response: &[u8],
+    next_cluster_token_value: &mut usize,
+    cluster_backends: &mut Vec<(SingleBackend, usize)>,
+    failed_slotsmap: &mut bool,
+) {
+    let mut handled_slotsmap = false;
+    {
+        let mut register_backend = |host:String, start: usize, end: usize| -> Result<(), RedisError> {
+            debug!("Backend slots map registered! {} From {} to {}", host, start, end);
+
+            for i in start..end+1 {
+                cluster.slots.remove(i);
+                cluster.slots.insert(i, host.clone());
+            }
+
+            if !cluster.hostnames.contains_key(&host) {
+                let addr = match host.parse() {
+                    Ok(a) => a,
+                    Err(err) => {
+                        error!("Unable to parse host: {}. Received error: {}", host, err);
+                        return Err(RedisError::UnparseableHost);
+                    }
+                };
+                initialize_host(
+                    &mut cluster.hostnames,
+                    cluster.token,
+                    &cluster.config,
+                    &cluster.poll_registry,
+                    cluster.timeout,
+                    cluster.failure_limit,
+                    cluster.retry_timeout,
+                    cluster.pool_token,
+                    cluster.num_backends,
+                    &cluster.cached_backend_shards,
+                    addr,
+                    next_cluster_token_value,
+                    cluster_backends
+                );
+            }
+            return Ok(());
+        };
+        // TODO: Verify the response is for a slotsmap
+        match handle_slotsmap(&response, &mut register_backend) {
+            Ok(_) => {
+                handled_slotsmap = true;
+            }
+            Err(err) => {
+                error!("Failed to parse slotsmap response. Received error: {:?}", err);
+                *failed_slotsmap = true;
+            }
+        }
+    }
+    if handled_slotsmap {
+        cluster.waiting_for_slotsmap_resp = false;
+    }
+}
+
+/*
+    Creates a connection to a cluster node.
+*/
+fn initialize_host(
+    hostnames: &mut HashMap<Host, BackendToken>,
+    self_token: Token,
+    config: &BackendConfig,
+    poll_registry: &Rc<RefCell<Poll>>,
+    timeout: usize,
+    failure_limit: usize,
+    retry_timeout: usize,
+    pool_token: PoolTokenValue,
+    num_backends: usize,
+    cached_backend_shards: &Rc<RefCell<Option<Vec<usize>>>>,
+    host: SocketAddr,
+    next_cluster_token_value: &mut usize,
+    cluster_backends: &mut Vec<(SingleBackend, usize)>,
+) {
+    let backend_token = Token(*next_cluster_token_value);
+    *next_cluster_token_value += 1;
+        let (single, _) = SingleBackend::new(
+            config.clone(),
+            host,
+            backend_token,
+            poll_registry,
+            timeout,
+            failure_limit,
+            retry_timeout,
+            pool_token,
+            num_backends,
+            cached_backend_shards,
+        );
+    cluster_backends.push((single, self_token.0));
+    hostnames.insert(host.to_string(), backend_token.clone());
 }

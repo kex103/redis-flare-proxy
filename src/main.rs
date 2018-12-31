@@ -27,6 +27,7 @@ use log4rs::append::console::ConsoleAppender;
 use log4rs::append::file::FileAppender;
 use log4rs::encode::pattern::PatternEncoder;
 use log4rs::config::{Appender, Config, Root};
+extern crate net2;
 
 mod admin;
 mod redflareproxy;

@@ -69,7 +69,7 @@ class BenchmarkProxy(TestUtil):
 
     def run_redis_benchmark(self, port):
         log_out = open("tests/log/{}.log.stdout2".format(self._testMethodName), 'w')
-        proc = subprocess.Popen(["redis-benchmark", "-p", "{}".format(port), "-t", "get,set", "-n", "50000"], stdout=log_out, stderr=subprocess.STDOUT)
+        proc = subprocess.Popen(["redis-benchmark", "-p", "{}".format(port), "-t", "get,set", "-n", "10000", "-c", "50", "-d", "3"], stdout=log_out, stderr=subprocess.STDOUT)
         kill_proc = lambda p: self.kill_process_for_timeout(p)
         timer = Timer(25, kill_proc, [proc])
         timer.start()
@@ -140,6 +140,23 @@ class BenchmarkProxy(TestUtil):
 
         proxy_proc = self.start_proxy_with_profiling(TestUtil.script_dir() + "/conf/timeout1.toml")
         #proc.wait()
+        self.run_redis_benchmark(1531)
+        r = redis.Redis(port=1530)
+        r.execute_command("SHUTDOWN")
+        proxy_proc.wait()
+
+    def test_benchmark_ten_backends_with_profiling(self):
+        self.start_redis_server(6380)
+        self.start_redis_server(6381)
+        self.start_redis_server(6382)
+        self.start_redis_server(6383)
+        self.start_redis_server(6384)
+        self.start_redis_server(6385)
+        self.start_redis_server(6386)
+        self.start_redis_server(6387)
+        self.start_redis_server(6388)
+        self.start_redis_server(6389)
+        proxy_proc = self.start_proxy_with_profiling(TestUtil.script_dir() + "/conf/timeout2.toml")
         self.run_redis_benchmark(1531)
         r = redis.Redis(port=1530)
         r.execute_command("SHUTDOWN")

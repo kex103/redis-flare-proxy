@@ -53,6 +53,7 @@ impl Backend {
         retry_timeout: usize,
         pool_token: PoolTokenValue,
         num_backends: usize,
+        cached_backend_shards: &Rc<RefCell<Option<Vec<usize>>>>,
     ) -> (Backend, Vec<Token>) {
         let weight = config.weight;
         let (backend, all_backend_tokens) = match config.use_cluster {
@@ -69,6 +70,7 @@ impl Backend {
                     retry_timeout,
                     pool_token,
                     num_backends,
+                    cached_backend_shards,
                 );
                 (BackendEnum::Single(backend), tokens)
             }
@@ -84,6 +86,7 @@ impl Backend {
                     retry_timeout,
                     pool_token,
                     num_backends,
+                    cached_backend_shards,
                 );
                 (BackendEnum::Cluster(backend), tokens)
             }
@@ -149,7 +152,9 @@ impl Backend {
         cluster_backends: &mut Vec<(SingleBackend, usize)>,
     ) {
         match self.single {
-            BackendEnum::Single(ref mut backend) => { backend.handle_backend_response(clients); }
+            BackendEnum::Single(ref mut backend) => {
+                let mut resp_handler = |_response: &[u8]| -> () {};
+                backend.handle_backend_response(clients, &mut resp_handler);}
             BackendEnum::Cluster(ref mut backend) => backend.handle_backend_response(token, clients, next_cluster_token_value, cluster_backends),
         };
     }
@@ -187,6 +192,7 @@ pub struct SingleBackend {
     waiting_for_db_resp: bool,
     waiting_for_ping_resp: bool,
     pub num_backends: usize,
+    cached_backend_shards: Rc<RefCell<Option<Vec<usize>>>>,
 }
 impl SingleBackend {
     pub fn new(
@@ -199,6 +205,7 @@ impl SingleBackend {
         retry_timeout: usize,
         pool_token: usize,
         num_backends: usize,
+        cached_backend_shards: &Rc<RefCell<Option<Vec<usize>>>>,
     ) -> (SingleBackend, Vec<Token>) {
         debug!("Initialized Backend: token: {:?}", token);
         // TODO: Configure message queue size per backend.
@@ -222,6 +229,7 @@ impl SingleBackend {
             waiting_for_db_resp: false,
             waiting_for_ping_resp: false,
             num_backends: num_backends,
+            cached_backend_shards: Rc::clone(cached_backend_shards),
         };
         (backend, Vec::new())
     }
@@ -264,6 +272,7 @@ impl SingleBackend {
             Err(err) => {
                 debug!("Failed to establish connection due to {:?}", err);
                 change_state(&mut self.status, BackendStatus::DISCONNECTED);
+                *self.cached_backend_shards.borrow_mut() = None;
                 self.set_retry_timer();
             }
         }
@@ -336,6 +345,7 @@ impl SingleBackend {
 
         if !wait_for_resp {
             change_state(&mut self.status, BackendStatus::READY);
+            *self.cached_backend_shards.borrow_mut() = None;
         }
     }
 
@@ -398,6 +408,7 @@ impl SingleBackend {
 
             if head.0 == NULL_TOKEN && (self.waiting_for_db_resp || self.waiting_for_auth_resp || self.waiting_for_ping_resp) {
                 change_state(&mut self.status, BackendStatus::DISCONNECTED);
+                *self.cached_backend_shards.borrow_mut() = None;
                 self.init_connection();
             }
 
@@ -429,6 +440,7 @@ impl SingleBackend {
 
     pub fn disconnect(&mut self) {
         change_state(&mut self.status, BackendStatus::DISCONNECTED);
+        *self.cached_backend_shards.borrow_mut() = None;
         self.failure_count = 0;
         self.socket = None;
     }
@@ -473,7 +485,11 @@ impl SingleBackend {
         }
     }
 
-    pub fn handle_backend_response(&mut self, clients: &mut HashMap<usize, (Client, usize)>) -> VecDeque<Vec<u8>> {
+    pub fn handle_backend_response(
+        &mut self,
+        clients: &mut HashMap<usize, (Client, usize)>,
+        internal_resp_handler: &mut FnMut(&[u8]),
+    ) {
         let prev_state = self.status;
         change_state(&mut self.status, BackendStatus::CONNECTED);
         if prev_state == BackendStatus::CONNECTING && self.status == BackendStatus::CONNECTED {
@@ -482,8 +498,6 @@ impl SingleBackend {
 
         // This can be considered DISCONNECTED already. If that's the case, disconnect should flush all responses in the queue.
         // This does happen because when disconnecting, the socket is set to None.
-
-        let mut unhandled_internal_responses = VecDeque::new();
 
         // Read all responses if there are any left.
         while self.queue.len() > 0 {
@@ -495,18 +509,19 @@ impl SingleBackend {
                 &mut self.waiting_for_auth_resp,
                 &mut self.waiting_for_db_resp,
                 &mut self.waiting_for_ping_resp,
-                &mut unhandled_internal_responses,
+                internal_resp_handler,
+                &self.cached_backend_shards,
             );
             match res {
                 Ok(true) => continue,
-                Ok(false) => { return unhandled_internal_responses; }
+                Ok(false) => { return; }
                 Err(err) => {
                     error!("Received incompatible response from backend. Forcing a disconnect. Received error while parsing: {}", err);
                     self.mark_backend_down(clients);
                 }
             }
         }
-        return unhandled_internal_responses;
+        return;
     }
 
     pub fn handle_backend_failure(&mut self, clients: &mut HashMap<usize, (Client, usize)>) {
@@ -598,7 +613,15 @@ impl SingleBackend {
     }
 }
 
-fn handle_internal_response(status: &mut BackendStatus, waiting_for_auth_resp: &mut bool, waiting_for_db_resp: &mut bool, waiting_for_ping_resp: &mut bool, response: &[u8], unhandled_queue: &mut VecDeque<Vec<u8>>) {
+fn handle_internal_response(
+    status: &mut BackendStatus,
+    waiting_for_auth_resp: &mut bool,
+    waiting_for_db_resp: &mut bool,
+    waiting_for_ping_resp: &mut bool,
+    response: &[u8],
+    internal_resp_handler: &mut FnMut(&[u8]),
+    cached_backend_shards: &Rc<RefCell<Option<Vec<usize>>>>,
+) {
     // TODO: Handle the various requirements.
     if *waiting_for_auth_resp && response == b"+OK\r\n" {
         *waiting_for_auth_resp = false;
@@ -610,11 +633,12 @@ fn handle_internal_response(status: &mut BackendStatus, waiting_for_auth_resp: &
         *waiting_for_ping_resp = false;
     }
     else {
-        unhandled_queue.push_back(response.to_vec());
+        internal_resp_handler(response);
         return;
     }
     if !*waiting_for_auth_resp && !*waiting_for_db_resp && !*waiting_for_ping_resp {
         change_state(status, BackendStatus::READY);
+        *cached_backend_shards.borrow_mut() = None;
     }
 }
 
@@ -661,7 +685,8 @@ fn route_backend_response(
     waiting_for_auth_resp: &mut bool,
     waiting_for_db_resp: &mut bool,
     waiting_for_ping_resp: &mut bool,
-    unhandled_internal_responses: &mut VecDeque<Vec<u8>>,
+    internal_resp_handler: &mut FnMut(&[u8]),
+    cached_backend_shards: &Rc<RefCell<Option<Vec<usize>>>>,
 ) -> Result<bool, RedisError> {
     match stream {
         Some(ref mut s) => {
@@ -727,7 +752,8 @@ fn route_backend_response(
                             waiting_for_db_resp,
                             waiting_for_ping_resp,
                             response,
-                            unhandled_internal_responses
+                            internal_resp_handler,
+                            cached_backend_shards,
                         );
                     } else {
                         handle_write_to_client(clients, &client_token.0, response);

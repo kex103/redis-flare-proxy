@@ -12,7 +12,6 @@ use redflareproxy::PoolToken;
 use config::{Distribution, BackendPoolConfig};
 use backend::{Backend};
 use redisprotocol::{extract_key, RedisError};
-
 use mio::*;
 use mio::tcp::{TcpListener};
 use std::string::String;
@@ -20,14 +19,12 @@ use std::io::{BufRead};
 use hashbrown::HashMap;
 use conhash::*;
 use conhash::Node;
-
 use rand::thread_rng;
 use rand::Rng;
-
 use std::cell::RefCell;
 use std::rc::Rc;
-
 use bufreader::BufReader;
+use net2;
 
 #[derive(Clone)]
 struct IndexNode {
@@ -43,7 +40,9 @@ pub struct BackendPool {
     pub token: PoolToken,
     pub config: BackendPoolConfig,
     pub name: String,
+
     // Cache list of backend tokens. Used for sharding purposes.
+    pub cached_backend_shards: Rc<RefCell<Option<Vec<usize>>>>,
 
     // index corresponding to the first backend associated with this pool.
     pub first_backend_index: usize,
@@ -62,6 +61,7 @@ impl BackendPool {
             config: config,
             first_backend_index: first_backend_index,
             listen_socket: None,
+            cached_backend_shards: Rc::new(RefCell::new(None)),
         }
     }
 
@@ -72,7 +72,10 @@ impl BackendPool {
     pub fn connect(&mut self, poll_registry: &mut Poll) -> Result<(), ProxyError> {
         // Setup the server socket
         let addr = self.config.listen;
-        let server_socket = match TcpListener::bind(&addr) {
+        let a = net2::TcpBuilder::new_v4().unwrap();
+        let b = a.bind(&addr).unwrap().listen(512).unwrap();
+        let c = TcpListener::from_std(b);
+        let server_socket = match c {
             Ok(soc) => soc,
             Err(err) => {
                 return Err(ProxyError::PoolBindSocketFailure(addr, err));
@@ -87,6 +90,18 @@ impl BackendPool {
             }
         };
         self.listen_socket = Some(server_socket);
+
+        if self.config.warm_sockets {
+            // There's an issue where new TcpStreams take 10-15 ms longer to be accepted. It appears to be due to some kind
+            // of collection resizing, as it occurs at 64, 128, 256 connections.
+            // This attempts to warm through 1024 sockets. It seems to work despite not connecting to anything.
+            let mut temp_collection = Vec::with_capacity(1024);
+            for _i in 0..1024 {
+                let a = "0.0.0.0:0".parse().unwrap();
+                temp_collection.push(mio::net::TcpStream::connect(&a));
+            }
+        }
+
         return Ok(());
     }
 
@@ -96,36 +111,34 @@ impl BackendPool {
         next_client_token_value: &mut ClientTokenValue,
         clients: &mut HashMap<ClientTokenValue, (Client, PoolTokenValue)>,
     ) {
-        loop {
-            match self.listen_socket {
-                Some(ref mut listener) => {
-                    loop {
-                        let mut stream = match listener.accept() {
-                            Ok(s) => s.0,
-                            Err(e) => {
-                                if e.kind() == std::io::ErrorKind::WouldBlock {
-                                    return;
-                                }
-                                panic!("Failed for some reason {:?}", e);
+        match self.listen_socket {
+            Some(ref mut listener) => {
+                loop {
+                    let mut stream = match listener.accept() {
+                        Ok(s) => s.0,
+                        Err(e) => {
+                            if e.kind() == std::io::ErrorKind::WouldBlock {
+                                return;
                             }
-                        };
-                        let client_token = Token(*next_client_token_value);
-                        *next_client_token_value += 1;
-                        match poll.borrow_mut().register(&stream, client_token, Ready::readable(), PollOpt::edge()) {
-                            Ok(_) => {
-                                clients.insert(client_token.0, (BufReader::new(stream), self.token.0));
-                                info!("Backend Connection accepted: client {:?}", client_token);
-                            }
-                            Err(err) => {
-                                error!("Failed to register client token to poll: {:?}", err);
-                            }
-                        };
-                    }
+                            panic!("Failed for some reason {:?}", e);
+                        }
+                    };
+                    let client_token = Token(*next_client_token_value);
+                    *next_client_token_value += 1;
+                    match poll.borrow_mut().register(&stream, client_token, Ready::readable(), PollOpt::edge()) {
+                        Ok(_) => {
+                            clients.insert(client_token.0, (BufReader::new(stream), self.token.0));
+                            debug!("Backend Connection accepted: client {:?}", client_token);
+                        }
+                        Err(err) => {
+                            error!("Failed to register client token to poll: {:?}", err);
+                        }
+                    };
                 }
-                None => {
-                    error!("Listen socket is no more when accepting!");
-                    return
-                }
+            }
+            None => {
+                error!("Listen socket is no more when accepting!");
+                return
             }
         }
     }
@@ -133,6 +146,7 @@ impl BackendPool {
 
 // Based on the given command, determine which Backend to use, if any.
 pub fn shard<'a>(
+    cached_backend_shards: &mut Option<Vec<usize>>,
     config: &BackendPoolConfig,
     backends: &'a mut [Backend],
     command: &[u8]) -> Result<&'a mut Backend, RedisError> {
@@ -175,13 +189,38 @@ pub fn shard<'a>(
         }
     }
 
-    // Get total size:
-    let mut total_weight = 0;
-    for ref mut backend in backends.iter_mut() {
-        if !config.auto_eject_hosts || backend.is_available() {
-            total_weight += backend.weight;
+
+    if cached_backend_shards.is_none() {
+        // Get total size:
+        let mut total_weight = 0;
+        for ref mut backend in backends.iter_mut() {
+            if !config.auto_eject_hosts || backend.is_available() {
+                total_weight += backend.weight;
+            }
         }
+
+        // mapping of weight to backend index.
+        let mut mapping : Vec<usize> = Vec::with_capacity(total_weight);
+
+        let mut index = 0;
+        let mut backend_index = 0;
+        for ref mut backend in backends.iter_mut() {
+            if !config.auto_eject_hosts || backend.is_available() {
+                for _i in index..index+backend.weight {
+                    mapping.push(backend_index);
+                }
+                index += backend.weight;
+            }
+            backend_index += 1;
+        }
+        *cached_backend_shards = Some(mapping);
     }
+
+
+    let total_weight = match cached_backend_shards {
+        Some(mapping) => mapping.len(),
+        None => { panic!("No cached backend mapping"); }
+    };
 
     let shard: Result<usize, ProxyError> = match config.distribution {
         Distribution::Modula => Ok(hash(&config.hash_function, &tag) % total_weight), // Should be using key, not command.
@@ -192,15 +231,12 @@ pub fn shard<'a>(
         Ok(shard_no) => {
             debug!("Sharding command tag to be {}", shard_no);
             {
-                for backend in backends.iter_mut() {
-                    if config.auto_eject_hosts && !backend.is_available() {
-                        continue;
-                    }
-                    if shard_no >= total_weight - 1 {
-                        return Ok(backend);
-                    }
-                    total_weight -= backend.weight;
-                }
+                let backend_index = match cached_backend_shards {
+                    Some(mapping) => mapping.get(shard_no).unwrap(),
+                    None => { panic!("No cached backend mapping when getting backend"); }
+                };
+                debug!("Now got index: {:?}", backend_index);
+                return Ok(backends.get_mut(*backend_index).unwrap());
             }
         }
         Err(error) => debug!("Received {:?} while sharding!", error),
@@ -276,8 +312,8 @@ fn mark_backend_down(
 }
 
 pub fn handle_client_readable(
+    backend_pool: &mut BackendPool,
     client_stream: &mut Client,
-    pool_config: &BackendPoolConfig,
     client_token: ClientToken,
     backends: &mut [Backend],
     cluster_backends: &mut Vec<(SingleBackend, usize)>,
@@ -313,7 +349,7 @@ pub fn handle_client_readable(
                 // Perhaps the API should be.. write_backend(message_string, token)
                 // A cluster needs... access to all possible connections.. ?
                 // Or it has its own.
-                match shard(pool_config, backends, &client_request) {
+                match shard(&mut backend_pool.cached_backend_shards.borrow_mut(), &mut backend_pool.config, backends, &client_request) {
                     Ok(backend) => {
                         match backend.write_message(&client_request, client_token, cluster_backends) {
                             Ok(_) => {}

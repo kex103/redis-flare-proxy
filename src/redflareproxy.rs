@@ -175,7 +175,7 @@ impl RedFlareProxy {
             backendpools: Vec::with_capacity(num_pools),
             backends: Vec::with_capacity(num_backends),
             cluster_backends: Vec::new(),
-            clients: HashMap::new(),
+            clients: HashMap::with_capacity(4096),
             config: config,
             staged_config: None,
             poll: poll,
@@ -412,7 +412,6 @@ impl RedFlareProxy {
             }
         }
         let subscriber = self.identify_token(token);
-
         match subscriber {
             SubType::PoolClient => {
                 debug!("PoolClient {:?}", token);
@@ -650,17 +649,13 @@ fn handle_client(
     match clients.get_mut(&token.0) {
         Some((client, pool_token_value)) => {
             let pool_index = *pool_token_value - FIRST_SOCKET_INDEX;
-            let pool_config = match backendpools.get(pool_index) {
-                Some(pool) => &pool.config,
-                None => panic!("Missing parent pool of client"),
-            };
             let start_backend_index = backendpools.get(pool_index).unwrap().first_backend_index - FIRST_SOCKET_INDEX - num_pools;
             let last_index = start_backend_index + backendpools.get(pool_index).unwrap().num_backends;
             let backends = match backends.get_mut(start_backend_index..last_index) {
                 Some(b) => b,
                 None => panic!("Unable to get full backends from {:?} to {:?}", start_backend_index, last_index),
             };
-            if handle_client_readable(client, &pool_config, *token, backends, cluster_backends) {
+            if handle_client_readable(&mut backendpools.get_mut(pool_index).unwrap(), client, *token, backends, cluster_backends) {
                 return;
             }
         }
@@ -696,10 +691,9 @@ fn init_backend_pool(
     try!(pool.connect(&mut poll.borrow_mut()));
 
     for backend_config in pool_config.servers.clone() {
-        let backend = init_backend(backend_config, pool_config, cluster_backends, pool_token_value, backend_token_value, poll, num_backends);
+        let backend = init_backend(backend_config, pool_config, cluster_backends, pool_token_value, backend_token_value, poll, num_backends, &pool.cached_backend_shards);
         backends.push(backend);
         backend_token_value += 1;
-        debug!("KEX: init_backend_pool Token_value now at {:?} backends len at {:?}", backend_token_value, backends.len());
     }
 
     backendpools.push(pool);
@@ -714,6 +708,7 @@ fn init_backend(
     backend_token_value: usize,
     poll_registry: &Rc<RefCell<Poll>>,
     num_backends: usize,
+    cached_backend_shards: &Rc<RefCell<Option<Vec<usize>>>>,
 ) -> Backend {
     // Initialize backends.
     let backend_token = Token(backend_token_value);
@@ -729,6 +724,7 @@ fn init_backend(
         pool_config.retry_timeout,
         pool_token_value,
         num_backends,
+        cached_backend_shards,
     );
     backend.init_connection(cluster_backends);
     return backend;
