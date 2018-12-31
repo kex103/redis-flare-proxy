@@ -59,7 +59,7 @@ impl fmt::Display for RedisError {
                     Err(_err) => write!(f, "RedisError::Unknown {:?}", v),
                 }
             }
-            err => write!(f, "{}:?", err),
+            err => write!(f, "{:?}", err),
         }
     }
 }
@@ -211,6 +211,9 @@ fn parse_redis_request(bytes: &[u8], index: &mut usize) -> Result<(), RedisError
                 return Ok(());
             }
             *index += num as usize + 2;
+            if *index > bytes.len() {
+                return Err(RedisError::IncompleteMessage);
+            }
             return Ok(());
         }
         '*' => {
