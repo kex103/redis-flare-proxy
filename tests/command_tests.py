@@ -1,8 +1,128 @@
 #!/usr/bin/env python
 import redis
+import socket
 from test_util import TestUtil
 
 class CommandTests(TestUtil):
+
+    def test_multikey_commands(self):
+        self.start_redis_server(6381)
+        self.start_redis_server(6382)
+        self.start_redis_server(6383)
+        self.start_redis_server(6385)
+        self.start_delayer(6384, 6385, 0, 6400)
+        self.start_proxy("tests/conf/multishard1.toml")
+
+        r = redis.Redis(port=1533, socket_timeout=1)
+
+        r.set("key2", "value2")
+        self.assertEquals(r.mget('key1', 'key2'), [None, 'value2'])
+        self.assertEquals(r.mget('key1', 'key2', None), [None, 'value2', None])
+
+        self.assertEquals(r.execute_command("MSET key4 value4 key5 value5"), ["OK", "OK"])
+        self.assertEquals(r.get("key4"), "value4")
+        self.assertEquals(r.get("key5"), "value5")
+
+        # Verify timeout error is returned if one of the partitions times out.
+        conn_to_delayer = socket.socket(socket.AF_INET)
+        conn_to_delayer.connect(("0.0.0.0", 6400))
+        conn_to_delayer.sendall("SETDELAY 400")
+
+        resp = r.mget('key1' ,'key2', 'key3')
+        self.assertEquals(len(resp), 3)
+        self.assertEquals(str(resp[0]), 'Proxy timed out')
+        self.assertEquals(resp[1], 'value2')
+        self.assertEquals(resp[2], None)
+
+        # Verify response error if no args are provided to mget.
+        try:
+            r.execute_command("MGET")
+            self.fail("Expected response error did not occur")
+        except redis.ResponseError, e:
+            self.assertEquals(str(e), "wrong number of arguments for 'mget' command")
+
+        # Verify response error if no args are provided to mset.
+        try:
+            r.execute_command("MSET")
+            self.fail("Expected response error did not occur")
+        except redis.ResponseError, e:
+            self.assertEquals(str(e), "wrong number of arguments for 'mset' command")
+
+        # Verify response error if odd number of args are provided to mset.
+        try:
+            r.execute_command("MSET key1 v1 key2 v2 key3")
+            self.fail("Expected response error did not occur")
+        except redis.ResponseError, e:
+            self.assertEquals(str(e), "wrong number of arguments for MSET")
+
+        # Verify pipelined requests work with multikey commands.
+        s1 = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        s1.settimeout(1)
+        s1.connect(("0.0.0.0", 1533))
+        s1.send(b"*3\r\n$4\r\nMGET\r\n$4\r\nkey1\r\n$4\r\nkey2\r\n*2\r\n$3\r\nGET\r\n$4\r\nkey3\r\n")
+        resp = s1.recv(1024)
+        self.assertEquals(resp, "*2\r\n-ERR Proxy timed out\r\n$6\r\nvalue2\r\n")
+        resp = s1.recv(1024)
+        self.assertEquals(resp, "$-1\r\n")
+        s1.close()
+
+        # Verify sending out another request before multikey command finishes.
+        s1 = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        s1.settimeout(1)
+        s1.connect(("0.0.0.0", 1533))
+        s2 = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        s2.settimeout(1)
+        s2.connect(("0.0.0.0", 1533))
+        s1.send(b"*3\r\n$4\r\nMGET\r\n$4\r\nkey1\r\n$4\r\nkey2\r\n*2\r\n$3\r\nGET\r\n$4\r\nkey3\r\n")
+        s2.send(b"*3\r\n$3\r\nSET\r\n$4\r\nkey3\r\n$2\r\nv3\r\n")
+        resp = s1.recv(1024)
+        self.assertEquals(resp, "*2\r\n-ERR Proxy timed out\r\n$6\r\nvalue2\r\n")
+        resp = s1.recv(1024)
+        self.assertEquals(resp, "$2\r\nv3\r\n")
+        s1.close()
+        resp = s2.recv(1024)
+        self.assertEquals(resp, "+OK\r\n")
+        s2.close()
+
+        # Verify sending another invalid request before multikey command finishes.
+        s1 = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        s1.settimeout(1)
+        s1.connect(("0.0.0.0", 1533))
+        s2 = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        s2.settimeout(1)
+        s2.connect(("0.0.0.0", 1533))
+        s1.send(b"*3\r\n$4\r\nMGET\r\n$4\r\nkey1\r\n$4\r\nkey2\r\n*2\r\n$3\r\nGET\r\n$4\r\nkey3\r\n")
+        s2.send(b"*3\r\n$3\r\nSET\r\n$4\r\nkey3\r\n$2\r\nv3")
+        resp = s1.recv(1024)
+        self.assertEquals(resp, "*2\r\n-ERR Proxy timed out\r\n$6\r\nvalue2\r\n")
+        resp = s1.recv(1024)
+        self.assertEquals(resp, "$2\r\nv3\r\n")
+        s1.close()
+        resp = s2.recv(1024)
+        self.assertEquals(resp, "-ERROR: Invalid redis protocol\r\n")
+        s2.close()
+
+        # Shutdown and start a proxy without enable_advanced_commands. Verify that mget/mset are now disabled.
+        try:
+            admin = redis.Redis(port=1530)
+            admin.shutdown()
+        except:
+            pass
+        self.start_redis_server(6380)
+        self.start_proxy("tests/conf/testconfig1.toml")
+        try:
+            r = redis.Redis(port=1531, socket_timeout=1)
+            r.execute_command("MGET key1")
+            self.fail("Expected response error did not occur")
+        except redis.ResponseError, e:
+            self.assertEquals(str(e), "ProxyError: Advanced commands are currently disabled. They can be enabled by setting 'enable_advanced_commands' to true in the proxy config")
+        try:
+
+            r = redis.Redis(port=1531, socket_timeout=1)
+            r.execute_command("MSET key1 value1")
+            self.fail("Expected response error did not occur")
+        except redis.ResponseError, e:
+            self.assertEquals(str(e), "ProxyError: Advanced commands are currently disabled. They can be enabled by setting 'enable_advanced_commands' to true in the proxy config")
 
     def test_script_commands(self):
         self.start_redis_server(6381)
@@ -51,7 +171,6 @@ class CommandTests(TestUtil):
 
         r = redis.Redis(port=1533, socket_timeout=1)
 
-        # TODO: Give proper error response to unsupported command.
         try:
             r.execute_command("FAKE_COMMAND key1")
             self.fail("Expected response error did not occur")
@@ -94,9 +213,7 @@ class CommandTests(TestUtil):
         self.assertEquals(r.execute_command("INCR key1"), 5)
         self.assertEquals(r.execute_command("INCRBY key1 2"), 7)
         self.assertEquals(r.execute_command("INCRBYFLOAT key1 0.5"), '7.5')
-        # TODO: Add support for mset/mget
-        #self.assertEquals(r.execute_command("MGET key1 key2"), ['7.5', None])
-        #self.assertEquals(r.execute_command("MSET key1 2 key2 four"), True)
+        # For MGET/MSET, see multikey test.
         self.assertEquals(r.execute_command("PSETEX key1 10000000 value"), 'OK')
         self.assertEquals(r.execute_command("SET key1 value2"), 'OK')
         self.assertEquals(r.execute_command("SETBIT key1 1 1"), 1)

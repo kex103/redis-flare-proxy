@@ -17,6 +17,7 @@ Features
 - Pipelined requests/responses
 - Consistent hashing option
 - Stats monitoring
+- Support for MGET/MSET commands.
 
 Requirements
 ==============

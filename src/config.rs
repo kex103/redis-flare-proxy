@@ -17,6 +17,9 @@ pub enum Distribution {
 pub struct RedFlareProxyConfig {
     pub admin: AdminConfig,
     pub pools: BTreeMap<String, BackendPoolConfig>,
+
+    #[serde(default)]
+    pub enable_advanced_commands: bool,
 }
 
 fn default_retry_timeout() -> usize {
@@ -143,6 +146,6 @@ pub fn load_config(full_config_path: String) -> Result<RedFlareProxyConfig, Prox
             }
         }
     }
-
+    
     Ok(config)
 }

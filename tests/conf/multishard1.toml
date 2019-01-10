@@ -1,3 +1,5 @@
+enable_advanced_commands = true
+
 [admin]
 listen = "127.0.0.1:1530"
 
@@ -10,3 +12,4 @@ listen = "127.0.0.1:1530"
       { host = "127.0.0.1:6383", weight = 1},
       { host = "127.0.0.1:6384", weight = 1},
     ]
+    timeout = 50

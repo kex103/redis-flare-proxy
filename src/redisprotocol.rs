@@ -49,6 +49,9 @@ pub enum RedisError {
     InvalidProtocol,
     UnparseableHost,
     IncompleteMessage,
+    MissingArgsMget,
+    MissingArgsMset,
+    WrongArgsMset,
 }
 impl fmt::Display for RedisError {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
@@ -64,8 +67,17 @@ impl fmt::Display for RedisError {
     }
 }
 
+#[derive(Debug, PartialEq)]
+pub enum KeyPos<'a> {
+    Single(&'a [u8]),
+    Multi(Vec<&'a [u8]>),
+    MultiSet(Vec<(&'a [u8], &'a [u8])>),
+}
+
 enum KeyPosition {
     Next,
+    Multi,
+    MultiInterleaved,
     Unsupported,
     Eval,
 }
@@ -73,12 +85,18 @@ enum KeyPosition {
 #[test]
 fn test_parsing_redis() {
     init_logging();
-    let a = "*2\r\n$3\r\nGET\r\n$4\r\nkey1\r\n".to_string();
-    let resp = extract_key(&a.as_bytes());
-    assert_eq!(resp, Ok("key1".as_bytes()));
-    let a = "*5\r\n$4\r\nEVAL\r\n$40\r\nreturn redis.call('set',KEYS[1],ARGV[1])\r\n$1\r\n1\r\n$5\r\nkey10\r\n$7\r\nvalue10".to_string();
-    let resp = extract_key(&a.as_bytes());
-    assert_eq!(resp, Ok("key10".as_bytes()));
+    let req = b"*2\r\n$3\r\nGET\r\n$4\r\nkey1\r\n";
+    let res = extract_key(req);
+    assert_eq!(res, Ok(KeyPos::Single(b"key1")));
+    let req = b"*5\r\n$4\r\nEVAL\r\n$40\r\nreturn redis.call('set',KEYS[1],ARGV[1])\r\n$1\r\n1\r\n$5\r\nkey10\r\n$7\r\nvalue10";
+    let res = extract_key(req);
+    assert_eq!(res, Ok(KeyPos::Single(b"key10")));
+    let req = b"*4\r\n$4\r\nMGET\r\n$2\r\nab\r\n$4\r\nkey2\r\n$4\r\nkey3\r\n";
+    let res = extract_key(req);
+    assert_eq!(res, Ok(KeyPos::Multi(vec!(b"ab", b"key2", b"key3"))));
+    let req = b"*5\r\n$4\r\nMSET\r\n$2\r\nab\r\n$2\r\ncd\r\n$4\r\nkey2\r\n$0\r\n\r\n";
+    let res = extract_key(req);
+    assert_eq!(res, Ok(KeyPos::MultiSet(vec!((b"ab", b"cd"), (b"key2", b"")))));
 }
 
 #[test]
@@ -230,7 +248,7 @@ fn parse_redis_request(bytes: &[u8], index: &mut usize) -> Result<(), RedisError
     }
 }
 
-pub fn extract_key(bytes: &[u8]) -> Result<&[u8], RedisError> {
+pub fn extract_key(bytes: &[u8]) -> Result<KeyPos, RedisError> {
     if bytes[0] == '*' as u8 {
         // then it is standard redis protcol.
         let mut index = 0;
@@ -260,15 +278,18 @@ pub fn extract_key(bytes: &[u8]) -> Result<&[u8], RedisError> {
                     return Err(RedisError::InvalidProtocol);
                 }
                 index += 1;
-                let num = try!(interpret_num(bytes, &mut index)) as usize;
+                let n = try!(interpret_num(bytes, &mut index));
+                if n < 0 {
+                    return Err(RedisError::InvalidProtocol);
+                }
+                let num = n as usize;
                 index += 2;
-                // TODO: Account fro num being -1.
 
                 // grab the command list.
                 let key = unsafe {
                     bytes.get_unchecked(index..index+num)
                 };
-                return Ok(key);
+                return Ok(KeyPos::Single(key));
             }
             KeyPosition::Eval => {
                 index += num + 2;
@@ -305,7 +326,98 @@ pub fn extract_key(bytes: &[u8]) -> Result<&[u8], RedisError> {
                 let key = unsafe {
                     bytes.get_unchecked(index..index+num)
                 };
-                return Ok(key);
+                return Ok(KeyPos::Single(key));
+            }
+            KeyPosition::Multi => {
+                // Go back to the beginning to determine number of keys.
+                let mut temp = 1;
+                let num_keys = try!(interpret_num(bytes, &mut temp)) as usize - 1;
+
+                let mut vec = Vec::new();
+
+                let mut num = num;
+
+                for _ in 0..num_keys {
+                    index += num + 2;
+
+                    if '$' as u8 != unsafe { *bytes.get_unchecked(index) } {
+                        return Err(RedisError::InvalidProtocol);
+                    }
+                    index += 1;
+                    let n = try!(interpret_num(bytes, &mut index));
+                    if n < 0 {
+                        return Err(RedisError::InvalidProtocol);
+                    }
+                    num = n as usize;
+                    index += 2;
+
+                    // grab the command list.
+                    let key = unsafe {
+                        bytes.get_unchecked(index..index+num)
+                    };
+                    vec.push(key);
+                }
+                if vec.len() == 0 {
+                    return Err(RedisError::MissingArgsMget);
+                }
+                return Ok(KeyPos::Multi(vec));
+            }
+            KeyPosition::MultiInterleaved => {
+                // Go back to the beginning to determine number of keys.
+                let mut temp = 1;
+                let num_keys = try!(interpret_num(bytes, &mut temp)) as usize - 1;
+
+                let mut vec = Vec::new();
+
+                let mut num = num;
+
+                if num_keys == 0 {
+                    return Err(RedisError::MissingArgsMset);
+                }
+                if num_keys % 2 == 1 {
+                    return Err(RedisError::WrongArgsMset);
+                }
+
+                for _ in 0..(num_keys)/2 {
+                    index += num + 2;
+
+                    if '$' as u8 != unsafe { *bytes.get_unchecked(index) } {
+                        return Err(RedisError::InvalidProtocol);
+                    }
+                    index += 1;
+                    let n = try!(interpret_num(bytes, &mut index));
+                    if n < 0 {
+                        return Err(RedisError::InvalidProtocol);
+                    }
+                    num = n as usize;
+                    index += 2;
+
+                    // grab the command list.
+                    let key = unsafe {
+                        bytes.get_unchecked(index..index+num)
+                    };
+
+                    index += num + 2;
+
+                    if '$' as u8 != unsafe { *bytes.get_unchecked(index) } {
+                        return Err(RedisError::InvalidProtocol);
+                    }
+                    index += 1;
+                    let n = try!(interpret_num(bytes, &mut index));
+                    if n < 0 {
+                        return Err(RedisError::InvalidProtocol);
+                    }
+                    num = n as usize;
+                    index += 2;
+
+                    // grab the command list.
+                    let value = unsafe {
+                        bytes.get_unchecked(index..index+num)
+                    };
+                    vec.push((key, value));
+
+                }
+                return Ok(KeyPos::MultiSet(vec));
             }
         };
     } else {
@@ -323,6 +435,9 @@ fn supported_keys(command: &[u8]) -> KeyPosition {
             return KeyPosition::Unsupported;
         }
         4 => {
+            if str4compare(command, 'E', 'V', 'A', 'L') { return KeyPosition::Eval; }
+            if str4compare(command, 'M', 'G', 'E', 'T') { return KeyPosition::Multi; }
+            if str4compare(command, 'M', 'S', 'E', 'T') { return KeyPosition::MultiInterleaved; }
             if str4compare(command, 'D', 'U', 'M', 'P') { return KeyPosition::Next; }
             if str4compare(command, 'P', 'T', 'T', 'L') { return KeyPosition::Next; }
             if str4compare(command, 'S', 'O', 'R', 'T') { return KeyPosition::Next; }
@@ -343,7 +458,6 @@ fn supported_keys(command: &[u8]) -> KeyPosition {
             if str4compare(command, 'S', 'R', 'E', 'M') { return KeyPosition::Next; }
             if str4compare(command, 'Z', 'A', 'D', 'D') { return KeyPosition::Next; }
             if str4compare(command, 'Z', 'R', 'E', 'M') { return KeyPosition::Next; }
-            if str4compare(command, 'E', 'V', 'A', 'L') { return KeyPosition::Eval; }
             return KeyPosition::Unsupported;
         }
         5 => {

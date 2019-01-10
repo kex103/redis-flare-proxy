@@ -24,3 +24,15 @@ class ClusterTests(TestUtil):
 
         TestUtil.populate_redis_key(1533, "key2")
         self.assert_redis_key(1533, "key2")
+
+    def test_cluster_timeout(self):
+        pass
+        # Test that if the cluster's only backends time out on the slotsmap request, it will resend it.
+
+        # Test that if a cluster times out many times, it will be blacked out?
+
+        # What about case where cluster is permanently down on some key range, should it be blacked out? Can we only black out relevant range?
+
+        # What about case where cluster is permnanently down on all key range. Maybe it should be blacked out.
+
+        # For pinging that range for health, it should use the correct key for that key slot...

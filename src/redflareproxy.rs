@@ -1,3 +1,4 @@
+use std::collections::VecDeque;
 use std::fmt;
 use std::error;
 use std::net::SocketAddr;
@@ -5,8 +6,6 @@ use backend::SingleBackend;
 use backendpool::handle_timeout;
 use backendpool::handle_client_readable;
 use config::BackendConfig;
-use bufreader::BufReader;
-use mio::net::TcpStream;
 use backend::Backend;
 use admin;
 use config::{RedFlareProxyConfig, BackendPoolConfig, load_config};
@@ -17,6 +16,7 @@ use mio::unix::{UnixReady};
 use std::mem;
 use std::cell::{RefCell};
 use std::rc::Rc;
+use client::Client;
 
 use hashbrown::HashMap;
 
@@ -47,7 +47,7 @@ pub type BackendToken = Token;
 pub type PoolToken = Token;
 pub type ClientToken = Token;
 
-pub type Client = BufReader<TcpStream>;
+//pub type Client = BufReader<TcpStream>;
 pub type ClientTokenValue = usize;
 pub type PoolIndex = usize;
 pub type PoolTokenValue = usize;
@@ -192,6 +192,7 @@ impl RedFlareProxy {
                 &mut redflareproxy.backends,
                 &pool_name,
                 &pool_config,
+                redflareproxy.config.enable_advanced_commands,
                 &mut redflareproxy.cluster_backends,
                 &mut next_backend_token_value,
                 pool_token_value,
@@ -334,6 +335,7 @@ impl RedFlareProxy {
                                 &mut new_backends,
                                 &pool_name,
                                 &pool_config,
+                                self.config.enable_advanced_commands,
                                 &mut new_cluster_backends,
                                 &mut next_backend_token_value,
                                 pool_token_value,
@@ -345,7 +347,7 @@ impl RedFlareProxy {
                     match existing_clients.remove(&pool_config.listen) {
                         Some(mut clients) => {
                             for mut client in clients.drain(0..) {
-                                let _ = self.poll.borrow_mut().reregister(client.get_ref(), Token(next_client_token_value), Ready::readable() | Ready::writable(), PollOpt::edge());
+                                let _ = self.poll.borrow_mut().reregister(client.stream.get_ref(), Token(next_client_token_value), Ready::readable() | Ready::writable(), PollOpt::edge());
                                 new_clients.insert(next_client_token_value, (client, pool_token_value));
                                 next_client_token_value += 1;
                             }
@@ -369,6 +371,11 @@ impl RedFlareProxy {
 
     pub fn run(&mut self) -> Result<(), ProxyError> {
         let mut events = Events::with_capacity(1024);
+        /*
+            A running collection of clients that should be checked if they have any pending requests. This is basically
+            a way to manually trigger a readable event for a client. This is used when a multikey command is completed.
+        */
+        let mut completed_clients = VecDeque::with_capacity(1024);
         while self.running {
             match self.poll.borrow_mut().poll(&mut events, None) {
                 Ok(_poll_size) => {}
@@ -377,13 +384,30 @@ impl RedFlareProxy {
                 }
             };
             for event in events.iter() {
-                self.handle_event(&event);
+                self.handle_event(&event, &mut completed_clients);
+            }
+            for completed_ctv in completed_clients.drain(0..) {
+                handle_client(
+                    &mut self.backendpools,
+                    &mut self.backends,
+                    &mut self.cluster_backends,
+                    &mut self.clients,
+                    &mut Token(completed_ctv),
+                    false,
+                );
             }
         }
         return Ok(());
     }
 
-    fn handle_event(&mut self, event: &Event) {
+    /*
+        Handles a poll event. Accumulates any clients that should be manually triggered.
+    */
+    fn handle_event(
+        &mut self,
+        event: &Event,
+        completed_clients: &mut VecDeque<ClientTokenValue>,
+    ) {
         let mut token = event.token();
         debug!("Event: {:?} {:?}", token, event.readiness());
         if event.readiness().contains(UnixReady::error()) {
@@ -399,7 +423,7 @@ impl RedFlareProxy {
                             return;
                         }
                     };
-                    backend.handle_backend_failure(token, &mut self.clients, &mut self.cluster_backends);
+                    backend.handle_backend_failure(token, &mut self.clients, &mut self.cluster_backends, completed_clients);
                     return;
                 }
                 SubType::PoolClient => {
@@ -421,6 +445,7 @@ impl RedFlareProxy {
                     &mut self.cluster_backends,
                     &mut self.clients,
                     &mut token,
+                    true,
                 );
             }
             SubType::Timeout => {
@@ -444,7 +469,7 @@ impl RedFlareProxy {
                 let backend_token = Token(token.0 - 2 * num_backends);
                 match self.backends.get_mut(token_id) {
                     Some(backend) => {
-                        handle_timeout(backend, backend_token, &mut self.clients, &mut self.cluster_backends);
+                        handle_timeout(backend, backend_token, &mut self.clients, &mut self.cluster_backends, completed_clients);
                     }
                     None => error!("HashMap says it has token but it really doesn't! {:?}", token),
                 }
@@ -463,7 +488,7 @@ impl RedFlareProxy {
                 let backend_index = convert_token_to_backend_index(token.0, num_pools);
                 let mut next_cluster_token_value = FIRST_CLUSTER_BACKEND_INDEX + self.cluster_backends.len();
                 match self.backends.get_mut(backend_index) {
-                    Some(b) => b.handle_backend_response(token, &mut self.clients, &mut next_cluster_token_value, &mut self.cluster_backends),
+                    Some(b) => b.handle_backend_response(token, &mut self.clients, &mut next_cluster_token_value, &mut self.cluster_backends, completed_clients),
                     None => error!("HashMap says it has token but it really doesn't!"),
                 }
             }
@@ -474,7 +499,7 @@ impl RedFlareProxy {
                 let pool_token_value = self.cluster_backends.get(cluster_index).unwrap().1;
                 let backend_index = convert_token_to_backend_index(pool_token_value, num_pools);
                 let mut next_cluster_token_value = FIRST_CLUSTER_BACKEND_INDEX + self.cluster_backends.len();
-                self.backends.get_mut(backend_index).unwrap().handle_backend_response(token, &mut self.clients, &mut next_cluster_token_value, &mut self.cluster_backends);
+                self.backends.get_mut(backend_index).unwrap().handle_backend_response(token, &mut self.clients, &mut next_cluster_token_value, &mut self.cluster_backends, completed_clients);
             }
             SubType::AdminClient => {
                 debug!("AdminClient {:?}", token);
@@ -499,14 +524,14 @@ impl RedFlareProxy {
     fn handle_client_socket(&mut self, token: ClientToken) {
         let mut switching_config = false;
         let request = {
-            let client_stream = match self.admin.client_sockets.get_mut(&token.0) {
-                Some(stream) => stream,
+            let client = match self.admin.client_sockets.get_mut(&token.0) {
+                Some(c) => c,
                 None => {
                     error!("AdminClient {:?} triggered an event, but it is no longer stored.", token);
                     return;
                 }
             };
-            parse_redis_command(client_stream)
+            parse_redis_command(&mut client.stream)
         };
         debug!("RECEIVED COMMAND: {}", request);
         let mut lines = request.lines();
@@ -644,10 +669,14 @@ fn handle_client(
     cluster_backends: &mut Vec<(SingleBackend, usize)>,
     clients: &mut HashMap<ClientTokenValue, (Client, PoolTokenValue)>,
     token: &mut Token,
+    remove_client_if_empty: bool,
 ) {
     let num_pools = backendpools.len();
     match clients.get_mut(&token.0) {
         Some((client, pool_token_value)) => {
+            if client.pending_count > 0 {
+                return;
+            }
             let pool_index = *pool_token_value - FIRST_SOCKET_INDEX;
             let start_backend_index = backendpools.get(pool_index).unwrap().first_backend_index - FIRST_SOCKET_INDEX - num_pools;
             let last_index = start_backend_index + backendpools.get(pool_index).unwrap().num_backends;
@@ -655,7 +684,7 @@ fn handle_client(
                 Some(b) => b,
                 None => panic!("Unable to get full backends from {:?} to {:?}", start_backend_index, last_index),
             };
-            if handle_client_readable(&mut backendpools.get_mut(pool_index).unwrap(), client, *token, backends, cluster_backends) {
+            if handle_client_readable(&mut backendpools.get_mut(pool_index).unwrap(), client, *token, backends, cluster_backends) || !remove_client_if_empty {
                 return;
             }
         }
@@ -675,6 +704,7 @@ fn init_backend_pool(
     backends: &mut Vec<Backend>,
     pool_name: &String,
     pool_config: &BackendPoolConfig,
+    enable_advanced_commands: bool,
     cluster_backends: &mut Vec<(SingleBackend, usize)>,
     next_backend_token_value: &mut usize,
     pool_token_value: usize,
@@ -682,7 +712,7 @@ fn init_backend_pool(
     num_backends: usize,
 ) -> Result<(), ProxyError> {
     let pool_token = Token(pool_token_value);
-    let mut pool = backendpool::BackendPool::new(pool_name.clone(), pool_token, pool_config.clone(), *next_backend_token_value);
+    let mut pool = backendpool::BackendPool::new(pool_name.clone(), pool_token, pool_config.clone(), enable_advanced_commands, *next_backend_token_value);
 
     let mut backend_token_value = *next_backend_token_value;
 

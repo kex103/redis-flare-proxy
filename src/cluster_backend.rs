@@ -1,10 +1,11 @@
+use redflareproxy::ClientTokenValue;
 use redisprotocol::RedisError;
 use redisprotocol::handle_slotsmap;
 use redisprotocol::WriteError;
 use std::net::SocketAddr;
 use redflareproxy::PoolTokenValue;
 use redflareproxy::convert_token_to_cluster_index;
-use redflareproxy::Client;
+use client::Client;
 use redflareproxy::{BackendToken, ClientToken, NULL_TOKEN};
 use backend::{BackendStatus, SingleBackend};
 use config::BackendConfig;
@@ -16,7 +17,7 @@ use std::time::Instant;
 use std::cell::{RefCell};
 use std::rc::Rc;
 use std;
-use redisprotocol::extract_key;
+use redisprotocol::{extract_key, KeyPos};
 
 pub type Host = String;
 
@@ -26,7 +27,7 @@ pub struct ClusterBackend {
     status: BackendStatus,
     config: BackendConfig,
     token: BackendToken,
-    queue: VecDeque<(ClientToken, Instant)>,
+    queue: VecDeque<(ClientToken, Instant, usize)>,
     pool_token: PoolTokenValue,
     // Following are stored for future backend connections that can be established.
     timeout: usize,
@@ -147,6 +148,7 @@ impl ClusterBackend {
         clients: &mut HashMap<usize, (Client, usize)>,
         next_cluster_token_value: &mut usize,
         cluster_backends: &mut Vec<(SingleBackend, usize)>,
+        completed_clients: &mut VecDeque<ClientTokenValue>,
     ) {
         let cluster_index = convert_token_to_cluster_index(backend_token.0);
         let mut additional_cluster_backends = Vec::new();
@@ -158,7 +160,7 @@ impl ClusterBackend {
                 handle_unhandled_response(self, response, next_cluster_token_value, &mut additional_cluster_backends, &mut failed_slotsmap);
             };
             match cluster_backends.get_mut(cluster_index) {
-                Some((backend, _)) => backend.handle_backend_response(clients, &mut resp_handler),
+                Some((backend, _)) => backend.handle_backend_response(clients, &mut resp_handler, completed_clients),
                 None => {
                     panic!("ClusterBackend is referencing a Backend that does not exist! Occurred when handling backend response.");
                 }
@@ -211,10 +213,11 @@ impl ClusterBackend {
         &mut self,
         backend_token: BackendToken,
         clients: &mut HashMap<usize, (Client, usize)>,
-        cluster_backends: &mut Vec<(SingleBackend, usize)>
+        cluster_backends: &mut Vec<(SingleBackend, usize)>,
+        completed_clients: &mut VecDeque<ClientTokenValue>,
     ) {
         let cluster_index = convert_token_to_cluster_index(backend_token.0);
-        cluster_backends.get_mut(cluster_index).unwrap().0.handle_backend_failure(clients);
+        cluster_backends.get_mut(cluster_index).unwrap().0.handle_backend_failure(clients, completed_clients);
     }
 
     // callback when a timeout has occurred.
@@ -223,9 +226,10 @@ impl ClusterBackend {
         backend_token: BackendToken,
         clients: &mut HashMap<usize, (Client, usize)>,
         cluster_backends: &mut Vec<(SingleBackend, usize)>,
+        completed_clients: &mut VecDeque<ClientTokenValue>,
     ) -> bool {
         let cluster_index = convert_token_to_cluster_index(backend_token.0);
-        cluster_backends.get_mut(cluster_index).unwrap().0.handle_timeout(clients);
+        cluster_backends.get_mut(cluster_index).unwrap().0.handle_timeout(clients, completed_clients);
         if self.queue.len() == 0 {
             return false;
         }
@@ -261,6 +265,10 @@ impl ClusterBackend {
 
     fn get_shard(&self, message: &[u8])-> BackendToken {
         let key = extract_key(&message).unwrap();
+        let key = match key {
+            KeyPos::Single(k) => k,
+            _ => panic!("TODO: unsupported Multi and other keypos"),
+        };
         let hash_no = State::<XMODEM>::calculate(key);
         let shard_no = hash_no % 16384;
         let hostname = self.slots.get(shard_no as usize).unwrap();
@@ -272,21 +280,26 @@ impl ClusterBackend {
         message: &[u8],
         client_token: ClientToken,
         cluster_backends: &mut Vec<(SingleBackend, usize)>,
+        request_id: (Instant, usize),
     ) -> Result<(), WriteError> {
         // get the predicted backend to write to.
         let backend_token = self.get_shard(message);
         debug!("Cluster Writing to {:?}. Source: {:?}", backend_token, client_token);
         let cluster_index = convert_token_to_cluster_index(backend_token.0);
-        try!(cluster_backends.get_mut(cluster_index).unwrap().0.write_message(message, client_token));
+        try!(cluster_backends.get_mut(cluster_index).unwrap().0.write_message(message, client_token, request_id));
         self.queue.push_back(cluster_backends.get(cluster_index).unwrap().0.queue.back().unwrap().clone());
         return Ok(());
     }
 }
 
-fn initialize_slotmap(queue: &mut VecDeque<(ClientToken, Instant)>, backend_token: BackendToken, cluster_backends: &mut Vec<(SingleBackend, usize)>) -> Result<(), WriteError> {
+fn initialize_slotmap(
+    queue: &mut VecDeque<(ClientToken, Instant, usize)>,
+    backend_token: BackendToken,
+    cluster_backends: &mut Vec<(SingleBackend, usize)>,
+) -> Result<(), WriteError> {
     let cluster_index = convert_token_to_cluster_index(backend_token.0);
     let ref mut host = cluster_backends.get_mut(cluster_index).unwrap().0;
-    try!(host.write_message(b"*2\r\n$7\r\nCLUSTER\r\n$5\r\nSLOTS\r\n", NULL_TOKEN));
+    try!(host.write_message(b"*2\r\n$7\r\nCLUSTER\r\n$5\r\nSLOTS\r\n", NULL_TOKEN, (Instant::now(), 0)));
     queue.push_back(host.queue.back().unwrap().clone());
     return Ok(());
 }

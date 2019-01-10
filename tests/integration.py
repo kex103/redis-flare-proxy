@@ -224,6 +224,17 @@ class TestRedFlareProxy(TestUtil):
         response = r4.execute_command("DBSIZE")
         self.assertEquals(response, 3)
 
+    def test_invalid_client_requests(self):
+        self.start_redis_server(6380)
+        self.start_proxy("tests/conf/testconfig1.toml")
+        s1 = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        s1.settimeout(1)
+        s1.connect(("0.0.0.0", 1531))
+        s1.send(b"*2\r\n$3\r\nGET\r\n$3\r\nhi1")
+        resp = s1.recv(1024)
+        s1.close()
+        self.assertEquals(resp, "-ERROR: Invalid redis protocol\r\n")
+
     def test_client_reclamation(self):
         # This tests that client tokens are reclaimed properly.
         # When a client connects, it gets assigned a vec index for the client. When it disconnects, it gets
@@ -271,6 +282,7 @@ class TestRedFlareProxy(TestUtil):
         client3.get('hi3')
         pool2.disconnect()
 """
+
 
 
 

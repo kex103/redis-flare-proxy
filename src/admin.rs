@@ -1,4 +1,4 @@
-use redflareproxy::Client;
+use client::Client;
 use redflareproxy::ClientTokenValue;
 use backend::write_to_stream;
 use redflareproxy::{ADMIN_LISTENER};
@@ -6,7 +6,6 @@ use redflareproxy::{ClientToken};
 use config::{AdminConfig};
 
 use mio::*;
-use bufreader::BufReader;
 use mio::tcp::{TcpListener};
 use hashbrown::HashMap;
 
@@ -61,7 +60,7 @@ impl AdminPort {
                             error!("Failed to register admin client socket to poll. Reason: {:?}", error);
                         }
                     };
-                    self.client_sockets.insert(token.0, BufReader::new(s));
+                    self.client_sockets.insert(token.0, Client::new(s));
                 }
                 Err(error) => {
                     if error.kind() == std::io::ErrorKind::WouldBlock {
@@ -76,8 +75,8 @@ impl AdminPort {
 
     pub fn write_to_client(&mut self, client_token: ClientToken, message: String) {
         match self.client_sockets.get_mut(&client_token.0) {
-            Some(client_stream) => {
-                match write_to_stream(client_stream, &message.into_bytes()[..]) {
+            Some(client) => {
+                match write_to_stream(&mut client.stream, &message.into_bytes()[..]) {
                     Ok(_) => { return; }
                     Err(err) => {
                         debug!("Unable to write to admin client. Received error: {}", err);
