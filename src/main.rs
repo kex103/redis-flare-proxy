@@ -37,6 +37,7 @@ mod backendpool;
 mod redisprotocol;
 mod hash;
 mod client;
+mod stats;
 
 mod bufreader;
 

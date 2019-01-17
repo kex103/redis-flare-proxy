@@ -14,6 +14,7 @@ from admin_tests import AdminTests
 from config_tests import ConfigTests
 from sharding_tests import ShardingTests
 from command_tests import CommandTests
+from stats_tests import StatsTests
 
 class TestRedFlareProxy(TestUtil):
 

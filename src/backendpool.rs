@@ -1,5 +1,8 @@
+use client::BufferedClient;
+use stats::Stats;
 use std::collections::VecDeque;
-use backend::write_to_stream;
+use backend::{write_to_client};
+use bufreader::BufReader;
 use redflareproxy::PoolTokenValue;
 use redflareproxy::ClientTokenValue;
 use backend::SingleBackend;
@@ -107,7 +110,8 @@ impl BackendPool {
         &mut self,
         poll: &Rc<RefCell<Poll>>,
         next_client_token_value: &mut ClientTokenValue,
-        clients: &mut HashMap<ClientTokenValue, (Client, PoolTokenValue)>,
+        clients: &mut HashMap<ClientTokenValue, (BufferedClient, PoolTokenValue)>,
+        stats: &mut Stats,
     ) {
         match self.listen_socket {
             Some(ref mut listener) => {
@@ -125,7 +129,8 @@ impl BackendPool {
                     *next_client_token_value += 1;
                     match poll.borrow_mut().register(&stream, client_token, Ready::readable(), PollOpt::edge()) {
                         Ok(_) => {
-                            clients.insert(client_token.0, (Client::new(stream), self.token.0));
+                            clients.insert(client_token.0, (BufReader::new(Client::new(stream)), self.token.0));
+                            stats.accepted_clients += 1;
                             debug!("Backend Connection accepted: client {:?}", client_token);
                         }
                         Err(err) => {
@@ -280,23 +285,25 @@ fn get_tag<'a>(key: &'a [u8], tags: &String) -> &'a [u8] {
 pub fn handle_timeout(
     backend: &mut Backend,
     backend_token: BackendToken,
-    clients: &mut HashMap<usize, (Client, usize)>,
+    clients: &mut HashMap<usize, (BufferedClient, usize)>,
     cluster_backends: &mut Vec<(SingleBackend, usize)>,
     completed_clients: &mut VecDeque<ClientTokenValue>,
+    stats: &mut Stats,
 ) {
-    if backend.handle_timeout(backend_token, clients, cluster_backends, completed_clients) {
-        mark_backend_down(backend, backend_token, clients, cluster_backends, completed_clients);
+    if backend.handle_timeout(backend_token, clients, cluster_backends, completed_clients, stats) {
+        mark_backend_down(backend, backend_token, clients, cluster_backends, completed_clients, stats);
     }
 }
 
 fn mark_backend_down(
     backend: &mut Backend,
     token: BackendToken,
-    clients: &mut HashMap<usize, (Client, usize)>,
+    clients: &mut HashMap<usize, (BufferedClient, usize)>,
     cluster_backends: &mut Vec<(SingleBackend, usize)>,
     completed_clients: &mut VecDeque<ClientTokenValue>,
+    stats: &mut Stats,
 ) {
-    backend.handle_backend_failure(token, clients, cluster_backends, completed_clients);
+    backend.handle_backend_failure(token, clients, cluster_backends, completed_clients, stats);
     //if self.config.auto_eject_hosts {
         //self.rebuild_pool_sharding();
     //}
@@ -304,23 +311,29 @@ fn mark_backend_down(
 
 pub fn handle_client_readable(
     backend_pool: &mut BackendPool,
-    client: &mut Client,
+    client: &mut BufferedClient,
     client_token: ClientToken,
     backends: &mut [Backend],
     cluster_backends: &mut Vec<(SingleBackend, usize)>,
+    completed_clients: &mut VecDeque<ClientTokenValue>,
+    stats: &mut Stats,
 ) -> bool {
     debug!("Handling client: {:?}", &client_token);
 
     // 1. Pull command from client.
     let buf_len = loop {
+        let mut id = 0;
+        let instant = std::time::Instant::now();
         let (buf_len, err_resp, more_buf) = {
-            let buf = match client.stream.fill_buf() {
-                Ok(b) => b,
-                Err(_err) => { &[] }
+            let buf = if client.fill_buf().is_ok() {
+                    &client.buf[client.pos..client.cap]
+                }
+                else {
+                    &[]
             };
             if buf.len() == 0 {
                 // mark client as closed.
-                (0, None, false)
+                (0, None, false) // Nothing. Mark it as closed. Mark as nothing?
             }
             else {
                 debug!("Read from client:\n{:?}", std::str::from_utf8(buf));
@@ -334,12 +347,23 @@ pub fn handle_client_readable(
                     }
                 };
                 debug!("Extracted from client:\n{:?}", std::str::from_utf8(&client_request));
-
                 if client_request.len() > 0 {
+                    stats.requests += 1;
                     match extract_key(&client_request) {
                         Ok(KeyPos::Single(key)) => {
-                            let backend = shard(&mut backend_pool.cached_backend_shards.borrow_mut(), &mut backend_pool.config, backends, key).unwrap();
-                            match backend.write_message(&client_request, client_token, cluster_backends, (std::time::Instant::now(), 0)) {
+                            let backend = shard(
+                                &mut backend_pool.cached_backend_shards.borrow_mut(),
+                                &mut backend_pool.config,
+                                backends,
+                                key
+                            ).unwrap();
+                            match backend.write_message(
+                                &client_request,
+                                client_token,
+                                cluster_backends,
+                                (instant, id),
+                                stats
+                            ) {
                                 Ok(_) => {}
                                 Err(err) => {
                                     debug!("Backend could not be written to. Received error: {}", err);
@@ -350,63 +374,103 @@ pub fn handle_client_readable(
                         Ok(KeyPos::Multi(vec)) => {
                             if !backend_pool.enable_advanced_commands {
                                 err_resp = Some(b"-ProxyError: Advanced commands are currently disabled. They can be enabled by setting 'enable_advanced_commands' to true in the proxy config\r\n");
-                            }
-                            let mut id = 1;
-                            let instant = std::time::Instant::now();
-                            client.pending_response = Vec::new();
-                            client.pending_count = vec.len();
-                            for key in vec.iter() {
-                                client.pending_response.push(Vec::new());
+                            } else {
+                                client.inner.pending_response = Vec::new();
+                                client.inner.pending_count = vec.len();
+                                for key in vec.iter() {
+                                    id += 1;
+                                    client.inner.pending_response.push(Vec::new());
 
-                                let backend = shard(&mut backend_pool.cached_backend_shards.borrow_mut(), &mut backend_pool.config, backends, key).unwrap();
-                                let mut split_msg : Vec<u8> = Vec::with_capacity(25 + key.len());
-                                split_msg.extend_from_slice(b"*2\r\n$3\r\nGET\r\n$");
-                                split_msg.extend_from_slice(&key.len().to_string().as_bytes());
-                                split_msg.extend_from_slice(b"\r\n");
-                                split_msg.extend_from_slice(key);
-                                split_msg.extend_from_slice(b"\r\n");
+                                    let backend = shard(
+                                        &mut backend_pool.cached_backend_shards.borrow_mut(),
+                                        &mut backend_pool.config,
+                                        backends,
+                                        key
+                                    ).unwrap();
+                                    let mut split_msg : Vec<u8> = Vec::with_capacity(25 + key.len());
+                                    split_msg.extend_from_slice(b"*2\r\n$3\r\nGET\r\n$");
+                                    split_msg.extend_from_slice(&key.len().to_string().as_bytes());
+                                    split_msg.extend_from_slice(b"\r\n");
+                                    split_msg.extend_from_slice(key);
+                                    split_msg.extend_from_slice(b"\r\n");
 
-                                match backend.write_message(&split_msg, client_token, cluster_backends, (instant, id)) {
-                                    Ok(_) => {}
-                                    Err(err) => {
-                                        debug!("Backend could not be written to when splitting. Received error: {}", err);
-                                        client.pending_response[id] = b"-ERROR: Not connected\r\n".to_vec();
-                                    }
-                                };
-                                id += 1;
+                                    match backend.write_message(
+                                        &split_msg,
+                                        client_token,
+                                        cluster_backends,
+                                        (instant, id),
+                                        stats
+                                    ) {
+                                        Ok(_) => {}
+                                        Err(err) => {
+                                            debug!("Backend could not be written to when splitting. Received error: {}", err);
+                                            let resp = b"-ERROR: Not connected\r\n";
+                                            if write_to_client(
+                                                &mut client.inner,
+                                                &client_token.0,
+                                                resp,
+                                                (instant, id),
+                                                completed_clients,
+                                                stats
+                                            ).is_err() {
+                                                return false;
+                                            };
+                                        }
+                                    };
+                                }
                             }
                         }
                         Ok(KeyPos::MultiSet(vec)) => {
                             if !backend_pool.enable_advanced_commands {
                                 err_resp = Some(b"-ProxyError: Advanced commands are currently disabled. They can be enabled by setting 'enable_advanced_commands' to true in the proxy config\r\n");
-                            }
-                            let mut id = 1;
-                            let instant = std::time::Instant::now();
-                            client.pending_response = Vec::new();
-                            client.pending_count = vec.len();
-                            for (key, args) in vec.iter() {
-                                client.pending_response.push(Vec::new());
+                            } else {
+                                client.inner.pending_response = Vec::new();
+                                client.inner.pending_count = vec.len();
+                                for (key, args) in vec.iter() {
+                                    id += 1;
+                                    client.inner.pending_response.push(Vec::new());
 
-                                let backend = shard(&mut backend_pool.cached_backend_shards.borrow_mut(), &mut backend_pool.config, backends, key).unwrap();
-                                let mut split_msg : Vec<u8> = Vec::with_capacity(35 + key.len() + args.len());
-                                split_msg.extend_from_slice(b"*3\r\n$3\r\nSET\r\n$");
-                                split_msg.extend_from_slice(&key.len().to_string().as_bytes());
-                                split_msg.extend_from_slice(b"\r\n");
-                                split_msg.extend_from_slice(key);
-                                split_msg.extend_from_slice(b"\r\n$");
-                                split_msg.extend_from_slice(&args.len().to_string().as_bytes());
-                                split_msg.extend_from_slice(b"\r\n");
-                                split_msg.extend_from_slice(args);
-                                split_msg.extend_from_slice(b"\r\n");
+                                    let backend = shard(
+                                        &mut backend_pool.cached_backend_shards.borrow_mut(),
+                                        &mut backend_pool.config,
+                                        backends,
+                                        key
+                                    ).unwrap();
+                                    let mut split_msg : Vec<u8> = Vec::with_capacity(35 + key.len() + args.len());
+                                    split_msg.extend_from_slice(b"*3\r\n$3\r\nSET\r\n$");
+                                    split_msg.extend_from_slice(&key.len().to_string().as_bytes());
+                                    split_msg.extend_from_slice(b"\r\n");
+                                    split_msg.extend_from_slice(key);
+                                    split_msg.extend_from_slice(b"\r\n$");
+                                    split_msg.extend_from_slice(&args.len().to_string().as_bytes());
+                                    split_msg.extend_from_slice(b"\r\n");
+                                    split_msg.extend_from_slice(args);
+                                    split_msg.extend_from_slice(b"\r\n");
 
-                                match backend.write_message(&split_msg, client_token, cluster_backends, (instant, id)) {
-                                    Ok(_) => {}
-                                    Err(err) => {
-                                        debug!("Backend could not be written to when splitting. Received error: {}", err);
-                                        client.pending_response[id] = b"-ERROR: Not connected\r\n".to_vec();
-                                    }
-                                };
-                                id += 1;
+                                    match backend.write_message(
+                                        &split_msg,
+                                        client_token,
+                                        cluster_backends,
+                                        (instant, id),
+                                        stats
+                                    ) {
+                                        Ok(_) => {}
+                                        Err(err) => {
+                                            debug!("Backend could not be written to when splitting. Received error: {}", err);
+                                            let resp = b"-ERROR: Not connected\r\n".to_vec();
+                                            if write_to_client(
+                                                &mut client.inner,
+                                                &client_token.0,
+                                                &resp,
+                                                (instant, id),
+                                                completed_clients,
+                                                stats
+                                            ).is_err() {
+                                                return false;
+                                            };
+                                        }
+                                    };
+                                }
                             }
                         }
                         Err(RedisError::NoBackend) => {
@@ -433,11 +497,12 @@ pub fn handle_client_readable(
                         }
                     };
                 }
-                let more_buf = buf.len() > client_request.len() && client.pending_count == 0;
+                let more_buf = buf.len() > client_request.len() && client.inner.pending_count == 0;
                 (consumed_len, err_resp, more_buf)
             }
         };
-        client.stream.consume(buf_len);
+        client.consume(buf_len);
+        stats.recv_client_bytes += buf_len;
 
 
         match err_resp {
@@ -447,9 +512,16 @@ pub fn handle_client_readable(
                 // Should check the written usize, and should retry if it's not all written.
                 // Also, with an error, ErrorKind::Interrupted, the error is non-fatal, and the write attempt can be re-attempted.
                 // Twemproxy tries forever if interrupted is received, or wouldblock, or EAGAIN
-                if write_to_stream(&mut client.stream, resp).is_err() {
+                if write_to_client(
+                    client.get_mut(),
+                    &client_token.0,
+                    resp,
+                    (instant, id),
+                    completed_clients,
+                    stats
+                ).is_err() {
                     return false;
-                }
+                };
             }
         }
         debug!("All done handling client! {:?}", buf_len);

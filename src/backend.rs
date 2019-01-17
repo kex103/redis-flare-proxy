@@ -1,3 +1,5 @@
+use client::BufferedClient;
+use stats::Stats;
 use redflareproxy::ClientTokenValue;
 use redisprotocol::WriteError;
 use redflareproxy::PoolTokenValue;
@@ -128,13 +130,22 @@ impl Backend {
     pub fn handle_timeout(
         &mut self,
         token: Token,
-        clients: &mut HashMap<usize, (Client, usize)>,
+        clients: &mut HashMap<usize, (BufferedClient, usize)>,
         cluster_backends: &mut Vec<(SingleBackend, usize)>,
         completed_clients: &mut VecDeque<ClientTokenValue>,
+        stats: &mut Stats,
     ) -> bool {
         match self.single {
-            BackendEnum::Single(ref mut backend) => backend.handle_timeout(clients, completed_clients),
-            BackendEnum::Cluster(ref mut backend) => backend.handle_timeout(token, clients, cluster_backends, completed_clients),
+            BackendEnum::Single(ref mut backend) => backend.handle_timeout(clients, completed_clients, stats),
+            BackendEnum::Cluster(ref mut backend) => {
+                backend.handle_timeout(
+                    token,
+                    clients,
+                    cluster_backends,
+                    completed_clients,
+                    stats
+                )
+            }
         }
     }
 
@@ -153,39 +164,51 @@ impl Backend {
         client_token: ClientToken,
         cluster_backends: &mut Vec<(SingleBackend, usize)>,
         request_id: (Instant, usize),
+        stats: &mut Stats,
     ) -> Result<(), WriteError> {
         match self.single {
-            BackendEnum::Single(ref mut backend) => backend.write_message(message, client_token, request_id),
-            BackendEnum::Cluster(ref mut backend) => backend.write_message(message, client_token, cluster_backends, request_id),
+            BackendEnum::Single(ref mut backend) => backend.write_message(message, client_token, request_id, stats),
+            BackendEnum::Cluster(ref mut backend) => {
+                backend.write_message(
+                    message,
+                    client_token,
+                    cluster_backends,
+                    request_id,
+                    stats,
+                )
+            }
         }
     }
 
     pub fn handle_backend_response(
         &mut self,
         token: BackendToken,
-        clients: &mut HashMap<usize, (Client, usize)>,
+        clients: &mut HashMap<usize, (BufferedClient, usize)>,
         next_cluster_token_value: &mut usize,
         cluster_backends: &mut Vec<(SingleBackend, usize)>,
         completed_clients: &mut VecDeque<ClientTokenValue>,
+        stats: &mut Stats,
     ) {
         match self.single {
             BackendEnum::Single(ref mut backend) => {
                 let mut resp_handler = |_response: &[u8]| -> () {};
-                backend.handle_backend_response(clients, &mut resp_handler, completed_clients);}
-            BackendEnum::Cluster(ref mut backend) => backend.handle_backend_response(token, clients, next_cluster_token_value, cluster_backends, completed_clients),
+                backend.handle_backend_response(clients, &mut resp_handler, completed_clients, stats);
+            }
+            BackendEnum::Cluster(ref mut backend) => backend.handle_backend_response(token, clients, next_cluster_token_value, cluster_backends, completed_clients, stats),
         };
     }
 
     pub fn handle_backend_failure(
         &mut self,
         token: Token,
-        clients: &mut HashMap<usize, (Client, usize)>,
+        clients: &mut HashMap<usize, (BufferedClient, usize)>,
         cluster_backends: &mut Vec<(SingleBackend, usize)>,
         completed_clients: &mut VecDeque<ClientTokenValue>,
+        stats: &mut Stats,
     ) {
         match self.single {
-            BackendEnum::Single(ref mut backend) => backend.handle_backend_failure(clients, completed_clients),
-            BackendEnum::Cluster(ref mut backend) => backend.handle_backend_failure(token, clients, cluster_backends, completed_clients),
+            BackendEnum::Single(ref mut backend) => backend.handle_backend_failure(clients, completed_clients, stats),
+            BackendEnum::Cluster(ref mut backend) => backend.handle_backend_failure(token, clients, cluster_backends, completed_clients, stats),
         }
     }
 }
@@ -315,7 +338,7 @@ impl SingleBackend {
     }
 
     // Callback after initializing a connection.
-    fn handle_connection(&mut self) {
+    fn handle_connection(&mut self, stats: &mut Stats,) {
         let mut wait_for_resp = false;
 
         // TODO: Cache the string pushing to config initialization.
@@ -326,7 +349,7 @@ impl SingleBackend {
             request.push_str("\r\n");
             request.push_str(&self.config.auth);
             request.push_str("\r\n");
-            if self.write_to_stream(NULL_TOKEN, &request.as_bytes(), (Instant::now(), 0)).is_err() {
+            if self.write_to_backend_stream(NULL_TOKEN, &request.as_bytes(), (Instant::now(), 0), stats).is_err() {
                 change_state(&mut self.status, BackendStatus::DISCONNECTED);
                 self.socket = None;
                 return;
@@ -342,7 +365,7 @@ impl SingleBackend {
             request.push_str("\r\n");
             request.push_str(&self.config.db.to_string());
             request.push_str("\r\n");
-            if self.write_to_stream(NULL_TOKEN, &request.as_bytes(), (Instant::now(), 0)).is_err() {
+            if self.write_to_backend_stream(NULL_TOKEN, &request.as_bytes(), (Instant::now(), 0), stats).is_err() {
                 change_state(&mut self.status, BackendStatus::DISCONNECTED);
                 self.socket = None;
                 return;
@@ -352,7 +375,7 @@ impl SingleBackend {
         }
 
         if self.timeout != 0 {
-            if self.write_to_stream(NULL_TOKEN, "PING\r\n".as_bytes(), (Instant::now(), 0)).is_err() {
+            if self.write_to_backend_stream(NULL_TOKEN, "PING\r\n".as_bytes(), (Instant::now(), 0), stats).is_err() {
                 change_state(&mut self.status, BackendStatus::DISCONNECTED);
                 self.socket = None;
                 return;
@@ -371,8 +394,9 @@ impl SingleBackend {
     // Returns a boolean, signifying whether to mark this backend as down or not.
     pub fn handle_timeout(
         &mut self,
-        clients: &mut HashMap<usize, (Client, usize)>,
+        clients: &mut HashMap<usize, (BufferedClient, usize)>,
         completed_clients: &mut VecDeque<ClientTokenValue>,
+        stats: &mut Stats,
     ) -> bool {
         debug!("Handling ReqestTimeout for Backend {:?}", self.token);
 
@@ -433,7 +457,14 @@ impl SingleBackend {
 
             if head.0 != NULL_TOKEN {
                 debug!("Trying to find client: {:?}", (head.0));
-                handle_write_to_client(clients, &(head.0).0, b"-ERR Proxy timed out\r\n", (head.1, head.2), completed_clients);
+                handle_write_to_client(
+                    clients,
+                    &(head.0).0,
+                    b"-ERR Proxy timed out\r\n",
+                    (head.1, head.2),
+                    completed_clients,
+                    stats,
+                );
             }
 
             if &target_timestamp == time {
@@ -468,8 +499,9 @@ impl SingleBackend {
     // TODO: Is it still needed to have a mark_backend_down AND handle_backend_failure?
     pub fn mark_backend_down(
         &mut self,
-        clients: &mut HashMap<ClientTokenValue, (Client, PoolTokenValue)>,
+        clients: &mut HashMap<ClientTokenValue, (BufferedClient, PoolTokenValue)>,
         completed_clients: &mut VecDeque<ClientTokenValue>,
+        stats: &mut Stats,
     ) {
         self.disconnect();
 
@@ -482,7 +514,14 @@ impl SingleBackend {
             match possible_token {
                 Some((NULL_TOKEN, _, _)) => {}
                 Some((client_token, instant, id)) => {
-                    handle_write_to_client(clients, &client_token.0, b"-ERR: Unavailable backend.\r\n", (instant, id), completed_clients);
+                    handle_write_to_client(
+                        clients,
+                        &client_token.0,
+                        b"-ERR: Unavailable backend.\r\n",
+                        (instant, id),
+                        completed_clients,
+                        stats,
+                    );
                 }
                 None => break,
             }
@@ -495,11 +534,12 @@ impl SingleBackend {
         message: &[u8],
         client_token: Token,
         request_id: (Instant, usize),
+        stats: &mut Stats,
     ) -> Result<(), WriteError> {
         // TODO: get rid of this wrapper function.
         match self.status {
             BackendStatus::READY => {
-                return self.write_to_stream(client_token, message, request_id);
+                return self.write_to_backend_stream(client_token, message, request_id, stats);
             }
             _ => {
                 debug!("No backend connection.");
@@ -510,14 +550,15 @@ impl SingleBackend {
 
     pub fn handle_backend_response(
         &mut self,
-        clients: &mut HashMap<usize, (Client, usize)>,
+        clients: &mut HashMap<usize, (BufferedClient, usize)>,
         internal_resp_handler: &mut FnMut(&[u8]),
         completed_clients: &mut VecDeque<ClientTokenValue>,
+        stats: &mut Stats,
     ) {
         let prev_state = self.status;
         change_state(&mut self.status, BackendStatus::CONNECTED);
         if prev_state == BackendStatus::CONNECTING && self.status == BackendStatus::CONNECTED {
-            self.handle_connection();
+            self.handle_connection(stats);
         }
 
         // This can be considered DISCONNECTED already. If that's the case, disconnect should flush all responses in the queue.
@@ -536,13 +577,14 @@ impl SingleBackend {
                 internal_resp_handler,
                 &self.cached_backend_shards,
                 completed_clients,
+                stats,
             );
             match res {
                 Ok(true) => continue,
                 Ok(false) => { return; }
                 Err(err) => {
                     error!("Received incompatible response from backend. Forcing a disconnect. Received error while parsing: {}", err);
-                    self.mark_backend_down(clients, completed_clients);
+                    self.mark_backend_down(clients, completed_clients, stats);
                 }
             }
         }
@@ -551,10 +593,11 @@ impl SingleBackend {
 
     pub fn handle_backend_failure(
         &mut self,
-        clients: &mut HashMap<usize, (Client, usize)>,
+        clients: &mut HashMap<usize, (BufferedClient, usize)>,
         completed_clients: &mut VecDeque<ClientTokenValue>,
+        stats: &mut Stats,
     ) {
-        self.mark_backend_down(clients, completed_clients);
+        self.mark_backend_down(clients, completed_clients, stats);
         self.set_retry_timer();
     }
 
@@ -592,17 +635,19 @@ impl SingleBackend {
         }
     }
 
-    fn write_to_stream(
+    fn write_to_backend_stream(
         &mut self,
         client_token: ClientToken,
         message: &[u8],
         request_id: (Instant, usize),
+        stats: &mut Stats,
     ) -> Result<(), WriteError> {
         debug!("Write to backend {:?} {}: {:?} {:?}", &self.token, self.host, std::str::from_utf8(&message), client_token);
-        match self.socket {
-            Some(ref mut s) => try!(write_to_stream(s, message)),
+        let bytes_written = match self.socket {
+            Some(ref mut s) => try!(write_to_stream(s.get_mut(), message)),
             None => return Err(WriteError::NoSocket),
-        }
+        };
+        stats.send_backend_bytes += bytes_written;
         // TODO: Keep trying on self.socket if it's INTERRUPTED or WOULDBLOCK, otherwise DISCONNECT the backend connection.
         let timestamp = request_id.0 + Duration::from_millis(self.timeout as u64);
         self.queue.push_back((client_token, timestamp, request_id.1));
@@ -709,7 +754,7 @@ fn change_state(status: &mut BackendStatus, target_state: BackendStatus) -> bool
 */
 fn route_backend_response(
     stream: &mut Option<BufReader<TcpStream>>,
-    clients: &mut HashMap<usize, (Client, usize)>,
+    clients: &mut HashMap<usize, (BufferedClient, usize)>,
     queue: &mut VecDeque<(Token, Instant, usize)>,
     status: &mut BackendStatus,
     waiting_for_auth_resp: &mut bool,
@@ -718,6 +763,7 @@ fn route_backend_response(
     internal_resp_handler: &mut FnMut(&[u8]),
     cached_backend_shards: &Rc<RefCell<Option<Vec<usize>>>>,
     completed_clients: &mut VecDeque<ClientTokenValue>,
+    stats: &mut Stats,
 ) -> Result<bool, RedisError> {
     match stream {
         Some(ref mut s) => {
@@ -787,12 +833,13 @@ fn route_backend_response(
                             cached_backend_shards,
                         );
                     } else {
-                        handle_write_to_client(clients, &client_token.0, response, request_id, completed_clients);
+                        handle_write_to_client(clients, &client_token.0, response, request_id, completed_clients, stats);
                     }
                     break response.len()
                 }
             };
             s.consume(len);
+            stats.recv_backend_bytes += len;
 
             return Ok(true);
         }
@@ -803,7 +850,7 @@ fn route_backend_response(
                 None => panic!("No more client token in backend queue, even though queue length was >0 just now!"),
             };
             if client_token != NULL_TOKEN {
-                handle_write_to_client(clients,&client_token.0, b"ERR Backend disconnected", request_id, completed_clients);
+                handle_write_to_client(clients,&client_token.0, b"ERR Backend disconnected", request_id, completed_clients, stats);
             }
             return Ok(false);
         }
@@ -812,7 +859,7 @@ fn route_backend_response(
 
 // This extracts the command from the stream.
 // TODO: Use a StreamingIterator: https://github.com/rust-lang/rfcs/pull/1598
-pub fn parse_redis_command(stream: &mut BufReader<TcpStream>) -> String {
+pub fn parse_redis_command<R: Read>(stream: &mut BufReader<R>) -> String {
     let mut command = String::new();
     let mut string = String::new();
     let _ = stream.read_line(&mut string);
@@ -878,12 +925,12 @@ fn create_timer() -> Timer<Instant> {
     builder.build()
 }
 
-pub fn write_to_stream(stream: &mut BufReader<TcpStream>, mut message: &[u8]) -> Result<(), WriteError> {
+pub fn write_to_stream(stream: &mut TcpStream, mut message: &[u8]) -> Result<(usize), WriteError> {
     loop {
-        match stream.get_mut().write(&message) {
+        match stream.write(&message) {
             Ok(bytes_written) => {
                 if bytes_written == message.len() {
-                    return Ok(());
+                    return Ok(bytes_written);
                 }
                 message = match message.get(bytes_written..) {
                     Some(m) => m,
@@ -903,7 +950,7 @@ pub fn write_to_stream(stream: &mut BufReader<TcpStream>, mut message: &[u8]) ->
                         continue;
                     }
                     _ => {
-                        let maybe_addr = match stream.get_ref().peer_addr() {
+                        let maybe_addr = match stream.peer_addr() {
                             Ok(addr) => Some(addr),
                             Err(_) => None,
                         };
@@ -916,49 +963,62 @@ pub fn write_to_stream(stream: &mut BufReader<TcpStream>, mut message: &[u8]) ->
 }
 
 pub fn handle_write_to_client(
-    clients: &mut HashMap<ClientTokenValue, (Client, PoolTokenValue)>,
+    clients: &mut HashMap<ClientTokenValue, (BufferedClient, PoolTokenValue)>,
     client_token_value: &ClientTokenValue,
     message: &[u8],
     request_id: (Instant, usize),
     completed_clients: &mut VecDeque<ClientTokenValue>,
+    stats: &mut Stats,
 ) {
-    let res = {
-        let (ref mut client, _) = match clients.get_mut(client_token_value) {
-            Some(a) => a,
-            None => { return; }
-        };
-        if request_id.1 == 0 {
-            // Id of 0 means that request is a normal request.
-            write_to_stream(&mut client.stream, message)
-        } else {
-            // Id > 0 means that the request is a multikey request.
-            client.pending_response[request_id.1 - 1] = message.to_vec();
-            client.pending_count -= 1;
-            if client.pending_count == 0 {
-                // Assemble the full response.
-                let mut full_message = Vec::new();
-                full_message.extend_from_slice(b"*");
-                full_message.extend_from_slice(client.pending_response.len().to_string().as_bytes());
-                full_message.extend_from_slice(b"\r\n");
-                for i in client.pending_response.iter() {
-                    full_message.extend_from_slice(&i);
-                }
-
-                // Add client to completed_clients, to force an event to trigger for the client. It will normally not
-                // fire because the poll is edge-triggered, not level-triggered.
-                completed_clients.push_back(*client_token_value);
-
-                write_to_stream(&mut client.stream, &full_message)
-            } else {
-                Ok(())
-            }
-        }
+    let res = match clients.get_mut(client_token_value) {
+        Some((client, _)) => write_to_client(client.get_mut(), client_token_value, message, request_id, completed_clients, stats),
+        None => { return; }
     };
     match res {
-        Ok(_) => {}
+        Ok(bytes_written) => {
+            stats.send_client_bytes += bytes_written;
+        }
         Err(err) => {
             debug!("Removing client: Received error: {}", err);
             clients.remove(client_token_value);
+        }
+    }
+}
+
+
+pub fn write_to_client(
+    client: &mut Client,
+    client_token_value: &ClientTokenValue,
+    message: &[u8],
+    request_id: (Instant, usize),
+    completed_clients: &mut VecDeque<ClientTokenValue>,
+    stats: &mut Stats,
+) -> std::result::Result<usize, WriteError> {
+    if request_id.1 == 0 {
+        // Id of 0 means that request is a normal request.
+        stats.responses += 1;
+        write_to_stream(&mut client.stream, message)
+    } else {
+        // Id > 0 means that the request is a multikey request.
+        client.pending_response[request_id.1 - 1] = message.to_vec();
+        client.pending_count -= 1;
+        if client.pending_count == 0 {
+            // Assemble the full response.
+            let mut full_message = Vec::new();
+            full_message.extend_from_slice(b"*");
+            full_message.extend_from_slice(client.pending_response.len().to_string().as_bytes());
+            full_message.extend_from_slice(b"\r\n");
+            for i in client.pending_response.iter() {
+                full_message.extend_from_slice(&i);
+            }
+
+            // Add client to completed_clients, to force an event to trigger for the client. It will normally not
+            // fire because the poll is edge-triggered, not level-triggered.
+            completed_clients.push_back(*client_token_value);
+            stats.responses += 1;
+            write_to_stream(&mut client.stream, &full_message)
+        } else {
+            Ok(0)
         }
     }
 }

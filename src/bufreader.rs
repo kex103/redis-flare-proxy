@@ -56,10 +56,10 @@ const DEFAULT_BUF_SIZE: usize = 16384;
 /// ```
 ////#[stable(feature = "rust1", since = "1.0.0")]
 pub struct BufReader<R> {
-    inner: R,
-    buf: Box<[u8]>,
-    pos: usize,
-    cap: usize,
+    pub inner: R,
+    pub buf: Box<[u8]>,
+    pub pos: usize,
+    pub cap: usize,
 }
 
 impl<R: Read> BufReader<R> {
