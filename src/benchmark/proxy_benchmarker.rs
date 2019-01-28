@@ -31,7 +31,7 @@ struct BenchmarkingClient {
 impl BenchmarkingClient {
     pub fn new(
         proxy_addr: FullHost,
-        event_poll: &mut Poll,
+        event_poll: &Poll,
         id: usize,
     ) -> Result<BenchmarkingClient, ErrorMessage> {
         let stream = TcpStream::connect(&proxy_addr).unwrap();
@@ -193,7 +193,7 @@ impl ProxyBenchmarker {
         for i in 0..NUMBER_OF_CLIENTS {
             self.client_streams.push(BenchmarkingClient::new(
                 proxy_addr,
-                &mut self.event_poll,
+                &self.event_poll,
                 i,
             ).unwrap());
         }

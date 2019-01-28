@@ -1,3 +1,6 @@
+use redflareproxy::BackendTokenValue;
+use std::sync::Arc;
+use std::sync::Mutex;
 use client::BufferedClient;
 use stats::Stats;
 use std::collections::VecDeque;
@@ -27,6 +30,7 @@ use rand::thread_rng;
 use rand::Rng;
 use std::cell::RefCell;
 use std::rc::Rc;
+use std::sync::atomic::Ordering;
 
 #[derive(Clone)]
 struct IndexNode {
@@ -51,7 +55,7 @@ pub struct BackendPool {
     pub first_backend_index: usize,
     pub num_backends: usize,
 
-    pub listen_socket: Option<TcpListener>,
+    pub listen_socket: Mutex<Option<TcpListener>>,
 }
 
 impl BackendPool {
@@ -64,7 +68,7 @@ impl BackendPool {
             config: config,
             enable_advanced_commands: enable_advanced_commands,
             first_backend_index: first_backend_index,
-            listen_socket: None,
+            listen_socket: Mutex::new(None),
             cached_backend_shards: Rc::new(RefCell::new(None)),
         }
     }
@@ -73,7 +77,7 @@ impl BackendPool {
         Attempts to establish the pool by binding to the listening socket, and registering to the event poll.
         If this process fails, an error is returned.
     */
-    pub fn connect(&mut self, poll_registry: &mut Poll) -> Result<(), ProxyError> {
+    pub fn connect(&mut self, poll_registry: &Poll) -> Result<(), ProxyError> {
         // Setup the server socket
         let addr = self.config.listen;
         let server_socket = match TcpListener::bind(&addr) {
@@ -90,7 +94,7 @@ impl BackendPool {
                 return Err(ProxyError::PoolPollFailure(err));
             }
         };
-        self.listen_socket = Some(server_socket);
+        *self.listen_socket.lock().unwrap() = Some(server_socket);
 
         if self.config.warm_sockets {
             // There's an issue where new TcpStreams take 10-15 ms longer to be accepted. It appears to be due to some kind
@@ -111,9 +115,9 @@ impl BackendPool {
         poll: &Rc<RefCell<Poll>>,
         next_client_token_value: &mut ClientTokenValue,
         clients: &mut HashMap<ClientTokenValue, (BufferedClient, PoolTokenValue)>,
-        stats: &mut Stats,
+        stats: &Stats,
     ) {
-        match self.listen_socket {
+        match *self.listen_socket.lock().unwrap() {
             Some(ref mut listener) => {
                 loop {
                     let mut stream = match listener.accept() {
@@ -127,10 +131,10 @@ impl BackendPool {
                     };
                     let client_token = Token(*next_client_token_value);
                     *next_client_token_value += 1;
-                    match poll.borrow_mut().register(&stream, client_token, Ready::readable(), PollOpt::edge()) {
+                    match poll.borrow().register(&stream, client_token, Ready::readable(), PollOpt::edge()) {
                         Ok(_) => {
                             clients.insert(client_token.0, (BufReader::new(Client::new(stream)), self.token.0));
-                            stats.accepted_clients += 1;
+                            stats.accepted_clients.fetch_add(1, Ordering::Relaxed);
                             debug!("Backend Connection accepted: client {:?}", client_token);
                         }
                         Err(err) => {
@@ -151,8 +155,8 @@ impl BackendPool {
 pub fn shard<'a>(
     cached_backend_shards: &mut Option<Vec<usize>>,
     config: &BackendPoolConfig,
-    backends: &'a mut [Backend],
-    key: &[u8]) -> Result<&'a mut Backend, RedisError> {
+    backends: &'a [Arc<Backend>],
+    key: &[u8]) -> Result<&'a Arc<Backend>, RedisError> {
     let tag = get_tag(key, &config.hash_tag);
 
     // How does the ConsistentHashing library work?
@@ -286,9 +290,9 @@ pub fn handle_timeout(
     backend: &mut Backend,
     backend_token: BackendToken,
     clients: &mut HashMap<usize, (BufferedClient, usize)>,
-    cluster_backends: &mut Vec<(SingleBackend, usize)>,
+    cluster_backends: &mut Vec<(Arc<SingleBackend>, usize)>,
     completed_clients: &mut VecDeque<ClientTokenValue>,
-    stats: &mut Stats,
+    stats: &Stats,
 ) {
     if backend.handle_timeout(backend_token, clients, cluster_backends, completed_clients, stats) {
         mark_backend_down(backend, backend_token, clients, cluster_backends, completed_clients, stats);
@@ -299,9 +303,9 @@ fn mark_backend_down(
     backend: &mut Backend,
     token: BackendToken,
     clients: &mut HashMap<usize, (BufferedClient, usize)>,
-    cluster_backends: &mut Vec<(SingleBackend, usize)>,
+    cluster_backends: &mut Vec<(Arc<SingleBackend>, usize)>,
     completed_clients: &mut VecDeque<ClientTokenValue>,
-    stats: &mut Stats,
+    stats: &Stats,
 ) {
     backend.handle_backend_failure(token, clients, cluster_backends, completed_clients, stats);
     //if self.config.auto_eject_hosts {
@@ -310,13 +314,13 @@ fn mark_backend_down(
 }
 
 pub fn handle_client_readable(
-    backend_pool: &mut BackendPool,
+    backend_pool: &BackendPool,
     client: &mut BufferedClient,
     client_token: ClientToken,
-    backends: &mut [Backend],
-    cluster_backends: &mut Vec<(SingleBackend, usize)>,
+    backends: &[Arc<Backend>],
+    cluster_backends: &mut Vec<(Arc<SingleBackend>, BackendTokenValue)>,
     completed_clients: &mut VecDeque<ClientTokenValue>,
-    stats: &mut Stats,
+    stats: &Stats,
 ) -> bool {
     debug!("Handling client: {:?}", &client_token);
 
@@ -348,12 +352,12 @@ pub fn handle_client_readable(
                 };
                 debug!("Extracted from client:\n{:?}", std::str::from_utf8(&client_request));
                 if client_request.len() > 0 {
-                    stats.requests += 1;
+                    stats.requests.fetch_add(1, Ordering::Relaxed);
                     match extract_key(&client_request) {
                         Ok(KeyPos::Single(key)) => {
                             let backend = shard(
                                 &mut backend_pool.cached_backend_shards.borrow_mut(),
-                                &mut backend_pool.config,
+                                &backend_pool.config,
                                 backends,
                                 key
                             ).unwrap();
@@ -383,7 +387,7 @@ pub fn handle_client_readable(
 
                                     let backend = shard(
                                         &mut backend_pool.cached_backend_shards.borrow_mut(),
-                                        &mut backend_pool.config,
+                                        &backend_pool.config,
                                         backends,
                                         key
                                     ).unwrap();
@@ -432,7 +436,7 @@ pub fn handle_client_readable(
 
                                     let backend = shard(
                                         &mut backend_pool.cached_backend_shards.borrow_mut(),
-                                        &mut backend_pool.config,
+                                        &backend_pool.config,
                                         backends,
                                         key
                                     ).unwrap();
@@ -502,7 +506,7 @@ pub fn handle_client_readable(
             }
         };
         client.consume(buf_len);
-        stats.recv_client_bytes += buf_len;
+        stats.recv_client_bytes.fetch_add(buf_len, Ordering::Relaxed);
 
 
         match err_resp {

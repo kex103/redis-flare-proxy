@@ -51,7 +51,7 @@ impl AdminPort {
         }
     }
 
-    pub fn accept_client_connection(&mut self, next_admin_token: usize, poll: &mut Poll) {
+    pub fn accept_client_connection(&mut self, next_admin_token: usize, poll: &Poll) {
         loop {
             match self.socket.accept() {
                 Ok((s, _)) => {
